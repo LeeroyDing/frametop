@@ -1,0 +1,27 @@
+--- a/src/ControlStream.c
++++ b/src/ControlStream.c
+@@ -1566,6 +1566,8 @@
+     }
+ }
+ 
++#define IDR_REQUEST_MIN_INTERVAL_MS 1000
++
+ static void requestIdrFrameFunc(void* context) {
+     while (!PltIsThreadInterrupted(&requestIdrFrameThread)) {
+         PltWaitForEvent(&idrFrameRequiredEvent);
+@@ -1581,6 +1583,15 @@
+ 
+         // Request the IDR frame
+         requestIdrFrame();
++
++        // Ask at most once per IDR_REQUEST_MIN_INTERVAL_MS. A host without reference frame
++        // invalidation answers every lost frame with an IDR; if those IDR frames themselves make
++        // the host drop frames, back-to-back requests turn the stream into a blurry IDR-only one
++        // that never recovers. Requests made meanwhile are coalesced into the next one.
++        for (int waited = 0; waited < IDR_REQUEST_MIN_INTERVAL_MS && !stopping &&
++                             !PltIsThreadInterrupted(&requestIdrFrameThread); waited += 50) {
++            PltSleepMs(50);
++        }
+     }
+ }
+ 
