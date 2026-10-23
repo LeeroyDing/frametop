@@ -10,10 +10,6 @@ For screen reset, aim at the target-shaped icon to the left of a screen's grab b
 
 With the current ft-screens desktop, Reset moves existing unpinned screens around your current head pose while preserving application windows, fullscreen, display settings, and remote connections. Pinned, off, and missing screens are skipped; independent floating windows stay in place. Use Open profile explicitly to restore saved apps and window positions. The older gamescope backend retains full-profile reset behavior. Pointer Recenter is a different action from resetting the screens, and Lazy Susan rotation itself is unchanged.
 
-## Remote display keyframe throttle
-
-`stream/moonlight-idr-throttle.patch` limits ft-stream's IDR (keyframe) requests to one per second. The Mac host has no reference frame invalidation, so every missing frame triggers an IDR request. On 23 October 2026 a Mac stream stuck at about 15 IDR requests a second: the host sent only every other frame, the panel showed only blurry 4 Mbit/s keyframes, and it took about 8 minutes to recover. With the throttle, requests made during the one-second wait are combined, and the panel keeps its last picture until the next keyframe arrives. `stream/build.sh` applies the patch after `moonlight-mic.patch`. To roll back, restore the previous `stream/build/ft-stream`.
-
 ## Source and installation
 
 Clone this branch explicitly; the upstream `get.sh` URL and upstream release downloads do not install a fork:
