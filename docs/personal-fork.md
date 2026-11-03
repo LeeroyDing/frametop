@@ -23,10 +23,10 @@ layout/ft-layout remote list                                         # each rout
 
 They are stored in the display's entry in `~/.config/frametop-layout.json` as `"routes": {"direct": {...}, "network": {...}}`. A route uses the display's own `fps` and `bitrate` for anything it leaves out, and 0 kbit/s is Frametop's default for the size and frame rate. Frame rates run from 1 to 240 and bitrates from 0 to 500000 kbit/s. Changing a route's settings starts a running stream over, with its panel where it is. The stream log names the route whose settings it used (`stream: the direct route's settings, 60 fps, 15000 kbit/s`), and the stream's state says which way it went (`live via dongle` for a direct address, `live via network`).
 
-The route is chosen when a stream connects, so a host that moves to another network mid-stream keeps its settings until the stream reconnects. Remote Displays still edits only the display's own settings.
+A stream that goes through the host's own address with route `auto` keeps checking the host's direct addresses, every 10 seconds on its own thread. Once one answers two checks in a row, such as the host's Ethernet being plugged in, the stream ends with `route: ADDRESS answers now, so the stream starts again through it` in its log and the state `lost moving to a direct address`. ft-screens starts it again 2 seconds later through that address, with that route's settings and its panel where it was. Over a direct address nothing is checked: if that link goes, the stream ends and comes back through the host's own address. Routes `network` and `dongle` never switch. Remote Displays still edits only the display's own settings.
 
-- `stream/route_settings.h`: a display's settings for a route; `stream/tests/route_settings_test.cpp` tests it (`scripts/test-route-settings.sh`).
-- `stream/ft-stream.cpp`: applies them once the route is chosen, before working out the default bitrate.
+- `stream/route_settings.h`: a display's settings for a route, a host's route and direct addresses, and the two-in-a-row rule for switching; `stream/tests/route_settings_test.cpp` tests them (`scripts/test-route-settings.sh`).
+- `stream/ft-stream.cpp`: applies the settings once the route is chosen, before working out the default bitrate, and watches for a direct address while on the host's own (`WatchDirect`).
 - `layout/ft_layout.py`: `remote set ROUTE.fps=F ROUTE.bitrate=KBPS` and `remote list`; `layout/tests/test_remote_routes.py` tests them.
 
 ## Source and installation

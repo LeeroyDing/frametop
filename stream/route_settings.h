@@ -1,5 +1,6 @@
-// A remote display's stream settings for the way its stream goes (Route in ft-stream.cpp).
-// Its entry in ~/.config/frametop-layout.json can give fps and bitrate per route:
+// The ways to a host and a remote display's stream settings for each (Route, WatchDirect and main
+// in ft-stream.cpp). A host's entry in ~/.config/frametop-layout.json has its "route" (auto,
+// network or dongle) and its "direct" addresses; a display's entry can give fps and bitrate per route:
 //   "routes": {"direct": {"fps": 60, "bitrate": 15000}, "network": {"bitrate": 4000}}
 // "direct" is a stream through one of the host's direct addresses (its dongle, or a second link
 // such as its Ethernet), "network" one through its own address. What a route leaves out stays as
@@ -10,8 +11,45 @@
 #include <nlohmann/json.hpp>
 
 #include <string>
+#include <vector>
 
 constexpr int kRouteFpsMax = 240, kRouteBitrateMax = 500000;  // kbit/s; ft-layout checks the same
+
+// A host's route (auto when it has none) and its direct addresses; known is false without an entry.
+struct HostRoute {
+    bool known = false;
+    std::string mode = "auto";
+    std::vector<std::string> direct;
+};
+
+inline HostRoute HostRouteOf(const nlohmann::json &layout, const std::string &host) {
+    HostRoute out;
+    if (!layout.is_object() || !layout.contains("hosts") || !layout["hosts"].is_array()) return out;
+    for (const auto &h : layout["hosts"]) {
+        if (!h.is_object() || h.value("address", "") != host) continue;
+        out.known = true;
+        if (h.contains("route") && h["route"].is_string()) out.mode = h["route"].get<std::string>();
+        if (h.contains("direct") && h["direct"].is_array())
+            for (const auto &d : h["direct"])
+                if (d.is_string()) out.direct.push_back(d.get<std::string>());
+        break;
+    }
+    return out;
+}
+
+// While a stream goes through the host's own address with route auto, a direct address that
+// starts answering takes it over (WatchDirect): once it has answered this many checks in a row,
+// kRerouteCheckSeconds apart, so a link that's still coming up isn't taken.
+constexpr int kRerouteAnswers = 2, kRerouteCheckSeconds = 10;
+
+struct RerouteWatch {
+    int streak = 0;
+    // One check, whether a direct address answered: true when it's time to move.
+    bool Check(bool answered) {
+        streak = answered ? streak + 1 : 0;
+        return streak >= kRerouteAnswers;
+    }
+};
 
 // Applies the route's settings to *fps and *bitrate. True if the display has settings for it.
 inline bool RouteSettings(const nlohmann::json &layout, const std::string &host, const std::string &id,

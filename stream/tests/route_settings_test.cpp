@@ -92,6 +92,33 @@ int main() {
         {"client": "frametop-mac-desktop", "routes": "fast"}]}]})"), "mac.local", "frametop-mac-desktop", "direct");
     CHECK(!g.routed), CHECK(g.bitrate == 4000);
 
+    // A host's route and direct addresses, as Route and WatchDirect read them.
+    HostRoute r = HostRouteOf(kLayout, "mac.local");
+    CHECK(r.known), CHECK(r.mode == "auto"), CHECK(r.direct.size() == 1 && r.direct[0] == "192.168.0.2");
+    r = HostRouteOf(kLayout, "pc.local");  // no route: auto; no direct addresses
+    CHECK(r.known), CHECK(r.mode == "auto"), CHECK(r.direct.empty());
+    r = HostRouteOf(kLayout, "other.local");
+    CHECK(!r.known), CHECK(r.mode == "auto"), CHECK(r.direct.empty());
+    r = HostRouteOf(nlohmann::json(), "mac.local");
+    CHECK(!r.known);
+    r = HostRouteOf(nlohmann::json::parse(R"({"hosts": [{"address": "mac.local", "route": "network",
+        "direct": ["192.168.0.2", 7, null, "10.0.0.2"]}]})"), "mac.local");
+    CHECK(r.known), CHECK(r.mode == "network");
+    CHECK(r.direct.size() == 2 && r.direct[0] == "192.168.0.2" && r.direct[1] == "10.0.0.2");  // strings only
+    r = HostRouteOf(nlohmann::json::parse(R"({"hosts": [{"address": "mac.local", "route": 3, "direct": "x"}]})"),
+                    "mac.local");
+    CHECK(r.known), CHECK(r.mode == "auto"), CHECK(r.direct.empty());  // malformed: as if missing
+
+    // A direct address takes the stream over only after answering kRerouteAnswers checks in a row.
+    static_assert(kRerouteAnswers == 2, "the checks below assume two answers in a row");
+    RerouteWatch w;
+    CHECK(!w.Check(true));   // first answer: could be a link still coming up
+    CHECK(!w.Check(false));  // gone again: start over
+    CHECK(!w.Check(true));
+    CHECK(w.Check(true));    // second in a row: move
+    RerouteWatch quiet;
+    for (int i = 0; i < 10; ++i) CHECK(!quiet.Check(false));
+
     std::printf("route_settings_test: %d checks, %d failed\n", g_checks, g_fail);
     return g_fail ? 1 : 0;
 }
