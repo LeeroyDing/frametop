@@ -50,6 +50,7 @@ test-c:
         if "$@" >"$log" 2>&1; then echo "$name: ok"; else echo "$name: FAILED"; cat "$log"; status=1; fi
     }
     run screens/tests/screen-scale-test.c scripts/test-screen-scale.sh
+    run stream/tests/route_settings_test.cpp scripts/test-route-settings.sh
     gcc -std=c11 -Wall -Wextra -Werror -I. screens/tests/controller-click-test.c \
       -lm -o build/tests/controller-click-test
     run screens/tests/controller-click-test.c build/tests/controller-click-test

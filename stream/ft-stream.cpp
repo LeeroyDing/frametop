@@ -59,6 +59,7 @@
 #include "../conf/ftsock.h"
 #include "host.h"
 #include "hostinput.h"
+#include "route_settings.h"
 
 #include <netdb.h>
 #include <opus/opus.h>
@@ -1063,8 +1064,6 @@ int main(int argc, char **argv) {
     if (id.empty()) return std::fprintf(stderr, "--id NAME is required: each display is its own client\n"), 2;
     if (width < 64 || height < 64 || width > 8192 || height > 8192 || fps < 1 || fps > 240)
         return std::fprintf(stderr, "bad --size or --fps\n"), 2;
-    // Moonlight's rule of thumb, about 20 Mbit/s for 1080p60, scaled by pixels and fps.
-    if (!bitrate) bitrate = int(std::min(150000.0, 20000.0 * width * height * fps / (1920.0 * 1080 * 60)));
 
     if (!port && (port = LayoutPort(host, id)))
         std::printf("%s: %s's port is %d (the layout)\n", host.c_str(), id.c_str(), port);
@@ -1101,6 +1100,12 @@ int main(int argc, char **argv) {
     }
     if (cmd == "stream") {
         if (fd < 0) return std::fprintf(stderr, "stream needs --fd: ft-screens starts it\n"), 2;
+        // The display's own settings for the way this stream goes, if it has them.
+        const char *via = route != host ? "direct" : "network";
+        const bool routed = RouteSettings(Layout(), host, id, via, &fps, &bitrate);
+        // Moonlight's rule of thumb, about 20 Mbit/s for 1080p60, scaled by pixels and fps.
+        if (!bitrate) bitrate = int(std::min(150000.0, 20000.0 * width * height * fps / (1920.0 * 1080 * 60)));
+        if (routed) std::printf("stream: the %s route's settings, %d fps, %d kbit/s\n", via, fps, bitrate);
         return Stream(client, app, fd, width, height, fps, bitrate);
     }
     return std::fprintf(stderr, "unknown command %s\n", cmd.c_str()), 2;

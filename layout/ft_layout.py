@@ -107,6 +107,10 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
                                      first, or with --login, with the Web UI login read from stdin
                                      as two lines: a Sunshine instance on PORT) -> its id
   ft-layout remote set ID size=WxH|fps=F|bitrate=KBPS|label=TEXT|app=APP|metres=M ...
+                     [direct.fps=F] [direct.bitrate=KBPS] [network.fps=F] [network.bitrate=KBPS]
+                                     direct.*: while its stream goes through one of the host's
+                                     direct addresses (a dongle, or its Ethernet); network.*: through
+                                     its own address; empty: the display's own again (it starts over)
   ft-layout remote host NAME route=auto|network|dongle direct=ADDRESS[,ADDRESS]|none mic=on|off input=on|off
                                      how a host's streams reach it (they start over), whether
                                      the Frame's microphone goes to it, and whether its keyboard
@@ -190,6 +194,10 @@ REMOTE_MAX = 16
 REMOTE_PIXELS_PER_METRE = 2400  # a new remote display's width in VR (5120 px: 2.1 m), at least 1 m
 GAMESTREAM_PORT = 47989  # a host's HTTP port, where ft-stream reaches it
 WEB_UI_PORT = 47990  # Vibepollo's Web UI: a host answers there when it's up
+# A display's own settings per route, the way ft-stream reaches its host (stream/route_settings.h):
+# "direct" through one of the host's direct addresses, "network" through its own address.
+ROUTE_LIMITS = {"fps": (1, 240), "bitrate": (0, 500000)}
+ROUTE_NAMES = ("direct", "network")
 STREAM = os.path.join(REPO, "stream", "build", "ft-stream")
 RESET_TIMER = os.path.join(REPO, "layout", "countdown", "build", "ft-reset-timer")
 
@@ -948,6 +956,34 @@ def remote_size(d):
     return m, m * h / w
 
 
+def route_settings(d):
+    """A remote display's stream settings for each route it has its own for, as ft-stream takes
+    them: {route: (fps, kbit/s)}, what a route leaves out being the display's own."""
+    routes = d.get("routes") if isinstance(d.get("routes"), dict) else {}
+    return {r: (int(routes[r].get("fps", d.get("fps", 60))), int(routes[r].get("bitrate", d.get("bitrate", 0))))
+            for r in ROUTE_NAMES if isinstance(routes.get(r), dict)}
+
+
+def set_route_setting(d, route, key, value):
+    """One of a display's settings for a route (ROUTE_NAMES); None goes back to the display's own."""
+    if not isinstance(d.get("routes"), dict):
+        d["routes"] = {}
+    routes = d["routes"]
+    if value is None:
+        routes.get(route, {}).pop(key, None)
+    else:
+        routes.setdefault(route, {})[key] = value
+    for r in [r for r, s in routes.items() if not s]:
+        del routes[r]
+    if not routes:
+        del d["routes"]
+
+
+def stream_settings(fps, bitrate):
+    """For remote list: "@60 4000 kbit/s" (0 kbit/s is ft-stream's default for the size and fps)."""
+    return f"@{fps} {bitrate} kbit/s" if bitrate else f"@{fps} default bitrate"
+
+
 def plan_remotes(layout, count, displays):
     """The remote displays' poses in the head frame (as plan()): their own place, or else a
     row above the screens, hinged like the arc preset."""
@@ -1199,7 +1235,9 @@ def remote_command(args):
             state = "disconnected" if d.get("off") else running.get(n, "off")
             state += f" route {host.get('route', 'auto')}{' mic' if host.get('mic') else ''}"
             state += " input" if host.get("input") else ""
-            print(f"{n} {d['id']} {host.get('name')} {display_target(host, d)} {d['app']} {w}x{h}@{d.get('fps', 60)} "
+            routes = "".join(f", {r} {stream_settings(*s)}" for r, s in route_settings(d).items())
+            print(f"{n} {d['id']} {host.get('name')} {display_target(host, d)} {d['app']} {w}x{h}"
+                  f"{stream_settings(d.get('fps', 60), d.get('bitrate', 0))}{routes} "
                   f"{state}{' hidden' if d.get('hidden') else ''}  {d.get('label', '')}")
         return
     if what == "host" and len(args) >= 3:
@@ -1355,8 +1393,10 @@ def remote_command(args):
     if what == "set" and len(args) >= 3:
         layout = load_layout()
         n, host, d = find_display(layout, args[1])
+        rerouted = False
         for kv in args[2:]:
             k, _, v = kv.partition("=")
+            route, dot, key = k.partition(".")
             if k == "size" and re.fullmatch(r"\d+x\d+", v.lower()):
                 d["size"] = list(stream_size(*(int(x) for x in v.lower().split("x"))))
             elif k in ("fps", "bitrate") and v.isdigit():
@@ -1367,13 +1407,24 @@ def remote_command(args):
                 d["metres"] = float(v)
             elif k == "app" and re.fullmatch(r"[A-Za-z0-9{}._:-]+", v):
                 d["app"] = v
+            elif dot and route in ROUTE_NAMES and key in ROUTE_LIMITS and (
+                    not v or (v.isdigit() and ROUTE_LIMITS[key][0] <= int(v) <= ROUTE_LIMITS[key][1])):
+                set_route_setting(d, route, key, int(v) if v else None)
+                rerouted = True
             else:
-                raise RuntimeError(f"remote set: {kv!r}? (size=WxH fps=F bitrate=KBPS label=TEXT app=APP metres=M)")
+                raise RuntimeError(f"remote set: {kv!r}? (size=WxH fps=F bitrate=KBPS label=TEXT app=APP metres=M "
+                                   "direct.fps=F direct.bitrate=KBPS network.fps=F network.bitrate=KBPS, "
+                                   "empty for the display's own; fps 1-240, bitrate 0-500000)")
         save_layout(layout)
         if d.get("off"):
             return  # disconnected: the new settings are for its next connection
         try:
-            start_remote(screens_socket(), n, host, d)  # starts over with the new settings
+            sock = screens_socket()
+            if rerouted and n in (remotes_running(sock) or {}):
+                # ft-screens starts a stream over only when what it passes changes, and a route's
+                # settings are ft-stream's own, so it starts over here, its panel where it is.
+                sock.ask(f"remote {n} stop")
+            start_remote(sock, n, host, d)  # starts over with the new settings
         except RuntimeError as e:
             log(f"saved; not applied now: {e}")
         return
