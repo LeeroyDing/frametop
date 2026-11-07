@@ -1,14 +1,12 @@
-# Personal fork: recenter countdown, controls guide, and per-network streams
+# Personal fork: KWin 6.6 scaling and per-network streams
 
-This branch is based on upstream `v0.3.0-exp.19` (`ef97943247de10e840f9b6759cc5a330bc761082`). Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); the maintained customization is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
+The `personal` branch is based on `kwin-6.6-output-scale` (`3b039d0`): upstream `experimental` (`fdfd96e`, the `v0.3.0` development line) plus the KWin 6.6 nested output scaling commit. Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); this fork is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
 
-## Use
+Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, and this fork reference.
 
-Open **Frametop Controls Guide** from the desktop application menu, or **Controls guide** in Frametop Input Settings. It opens the **Recenter & controls** reference page in the existing Frametop Tour. You can also choose that page from the Tour's page list. It works offline and does not perform a reset when opened.
+## KWin 6.6 nested output scaling
 
-For screen reset, aim at the target-shaped icon to the left of a screen's grab bar, pinch once, release, and look forward. A head-following **3 → 2 → 1** says **Look straight ahead**, then the existing layout reset samples the current head pose. Meta+Shift+R, the Reset Screen Layout menu item, and mapped reset controls use the same countdown. A direct fingertip tap retains its confirmation step first.
-
-With the current ft-screens desktop, Reset moves existing unpinned screens around your current head pose while preserving application windows, fullscreen, display settings, and remote connections. Pinned, off, and missing screens are skipped; independent floating windows stay in place. Use Open profile explicitly to restore saved apps and window positions. The older gamescope backend retains full-profile reset behavior. Pointer Recenter is a different action from resetting the screens, and Lazy Susan rotation itself is unchanged.
+The base commit reconciles KWin 6.6's nested output scaling with ft-screens. It advertises fractional scaling, configures the nested output in logical dimensions, and keeps layout positions consistent with the requested scale while KWin applies changes. Floating-window metadata uses the same scale convention. The implementation and SteamOS update checks are documented in `docs/design.md` and `scripts/update-check.py`; offline coverage lives in `screens/tests/screen-scale-test.c` and `layout/tests/test_scales.py`.
 
 ## Per-network stream settings
 
@@ -29,37 +27,41 @@ A stream that goes through the host's own address with route `auto` keeps checki
 - `stream/ft-stream.cpp`: applies the settings once the route is chosen, before working out the default bitrate, and watches for a direct address while on the host's own (`WatchDirect`).
 - `layout/ft_layout.py`: `remote set ROUTE.fps=F ROUTE.bitrate=KBPS` and `remote list`; `layout/tests/test_remote_routes.py` tests them.
 
+## Upstream integration
+
+Per-route settings and direct-address checks work with upstream's desktop-free streaming (DEE-340): a running ft-screens stream does not need KWin or Plasma to change routes. `remote list` retains upstream's microphone and host-input flags alongside each route's settings. `WatchDirect` reports the handoff before connection teardown, retaining upstream's exit watchdog, host-input release, microphone cleanup, and gamepad release.
+
+The controls guide is available from the desktop application menu and Frametop Input Settings. Screen reset runs the head-following countdown before sampling the head pose, then moves existing unpinned panels while preserving apps and streams. Explicit Open profile restores saved apps and window positions. These behaviors and their tests are maintained upstream.
+
 ## Source and installation
 
-Clone this branch explicitly; the upstream `get.sh` URL and upstream release downloads do not install a fork:
+Clone this branch explicitly; upstream release downloads do not install this fork:
 
 ```sh
 git clone --branch personal https://github.com/LeeroyDing/frametop.git
 cd frametop
 ```
 
-For a new source installation, follow the repository's normal installation prerequisites and run `./install.sh` interactively. It builds the countdown with the existing components and installs the guide launcher. Review the installer's optional components; a full install can require a SteamVR restart. A prepared release image builds the same helper through `pack/Containerfile`; this fork does not currently publish prebuilt release assets.
-
-For an existing installation, stage the changes against its exact release and preserve its configuration, local patches, and original files. Avoid replacing a running installation wholesale. The guide itself consists of the Tour page, its launcher, and the Input Settings link. The countdown is a separate source/build integration; an existing verified local countdown can remain in place while adding the guide.
-
-- `tour/ft_tour.py`: reference page data; `FT_TOUR_PAGE=recenter` deep-links it.
-- `tour/ft-recenter-help.desktop` and `tour/install.sh`: direct application-menu entry.
-- `input-settings/`: opens the reference page from the settings menu.
-- `layout/countdown/`: helper source, pinned build recipe, and offline tests; output stays in its ignored `build/` directory.
-- `layout/ft_layout.py`: countdown before current-head sampling, geometry-only recentering on ft-screens, and a separate nonblocking lock held through reset completion.
-
-The helper is optional. If it cannot run, reset retains a minimum three-second delay; a hung helper is bounded. It accepts no input and uses the `frametop.guide` overlay-key prefix excluded by the custom pointer. Direct `apply`, `use`, and startup operations retain their original timing.
+Follow the repository's installation prerequisites and normal `./install.sh` workflow. Build components in the dev container; from a PC, edit locally and use `scripts/sync.sh` and `scripts/frame.sh`. This fork does not currently publish prebuilt release assets.
 
 ## Verify changes
 
-Run `python3 tour/test/tour-test.py` for the existing Tour suite and the offline countdown checks documented in `layout/countdown/README.md`. For per-network streams, run `python3 -m unittest discover -s layout/tests` and `scripts/test-route-settings.sh`. The normal `just test` recipe includes these checks in the build container. Check Python/shell syntax and load the guide using the matching Qt/Kirigami runtime.
+Run these offline checks from the checkout. The route-settings test requires a C++17 compiler and nlohmann/json, supplied by the dev container. The countdown lifecycle tests require the pinned STB headers from `layout/countdown/deps.sh` and an installed TrueType font.
 
-Build with `layout/countdown/build.sh` through the normal container workflow, then run the built helper's `--check` offline in the runtime where reset executes. Inspect its offline `--render-dir DIR` previews if its appearance changes. A deliberate live reset test should confirm the countdown follows the head, the pointer passes through it, it disappears, and the final alignment is correct. Reset on ft-screens should leave playback fullscreen and app/window state intact; explicit Open profile can reposition application windows.
+```sh
+./scripts/test-screen-scale.sh
+./scripts/test-route-settings.sh
+python3 -m unittest discover -s layout/tests -v
+python3 -m unittest discover -s layout/countdown/tests -v
+git diff --check
+```
+
+`just test` runs the layout and countdown suites in `test-python`, and both screen-scale and route-settings checks in `test-c`. The C/C++ test scripts compile locally wherever they run, so they work inside the image without SSH or a headset.
+
+Live checks should cover scaled output sizes and placement on KWin 6.6, route-specific frame rate and bitrate, and a network stream moving to a newly available direct address. Repeat route checks while streaming without the desktop. Arrange any live headset checks with its wearer first.
 
 ## Keep the fork up to date
 
-Keep `upstream` pointing to `https://github.com/Frametop/frametop.git`. Review upstream changes before merging or rebasing them into `personal`; the base here is experimental, while upstream `main` can lag it. If upstream adds equivalent countdown/help behavior, reconcile or retire the local changes rather than stacking duplicate delays.
+Keep `upstream` pointing to `https://github.com/Frametop/frametop.git`. Review changes against the exact experimental base before rebasing; upstream `main` can lag it. Retire local changes when upstream provides equivalent behavior, and preserve upstream's stream lifecycle and cleanup fixes when resolving conflicts.
 
-After each update, check reset dispatch and current-head sampling, profile behavior, the separate duplicate-reset lock, the helper's container path and fonts, and exclusion of `frametop.guide` overlays from pointer targeting. Run the tests against the resulting code and do a controlled in-headset check. Neither a clean Git merge nor an old test result proves a new runtime works.
-
-For rollback, restore the previous source revision or the same installed release's pre-edit files and helper. Removing only the helper leaves the Python fallback delay. Do not copy the complete exp.19 layout script over a newer release. The upstream uninstaller removes the new guide launcher together with the existing Frametop entries.
+After an update, rerun the offline tests and check the relevant SteamOS package hints in `scripts/update-check.py`. For rollback, preserve the previous `personal` tip before rebasing and restore its matching source and built components through the normal workflow.
