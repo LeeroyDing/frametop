@@ -93,6 +93,9 @@ test-c:
     g++ -std=c++17 -O2 -Wall -Wextra -Werror screens/tests/levelpin-test.cpp \
       -o build/tests/levelpin-test
     run screens/tests/levelpin-test.cpp build/tests/levelpin-test
+    g++ -std=c++17 -O2 -Wall -Wextra -Werror screens/tests/posturetilt-test.cpp \
+      -o build/tests/posturetilt-test
+    run screens/tests/posturetilt-test.cpp build/tests/posturetilt-test
     g++ -std=c++17 -O2 -Wall -Wextra -Werror screens/tests/universefix-test.cpp \
       -o build/tests/universefix-test
     run screens/tests/universefix-test.cpp build/tests/universefix-test

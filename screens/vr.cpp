@@ -125,6 +125,7 @@
 #include "roomview.h"
 #include "levelpin.h"
 #include "posemath.h"
+#include "posturetilt.h"
 #include "../conf/ftsock.h"
 #include "vrcmd.h"
 #include "trackwatch.h"
@@ -2630,6 +2631,157 @@ void SpinCommand(const char *arg, char *reply, int size) {
     std::snprintf(reply, size, "ok %.1f", turn);
 }
 
+// ---------------------------------------------------------------- the posture tilt
+// Leaning back tilts the panels in the room down round the eyes, each across its own bearing, and
+// sitting up tilts them back (posturetilt.h). Leaning is measured from ft-layout's anchor, the eyes and
+// heading the screens were last arranged from (layout-anchor.json, read again when it changes). Each
+// panel keeps its own tilt: a "place" (an arrange or a reset) levels the one it places, and a panel
+// grabbed mid-way keeps the part it got, so tilting back undoes just that.
+struct Tilt {
+    double deg = 0;                  // SCREEN_TILT_DEG: how far (0: off)
+    bool on = true;                  // SCREEN_TILT (handsetting SCREEN_TILT 0|1)
+    bool manual = false;             // "handsetting SCREEN_TILT down|up": as asked, until "auto"
+    double target = 0;               // the tilt asked for now (degrees; negative: down)
+    std::map<int, double> applied;   // each panel's tilt now (none: level)
+    struct Move {
+        Mat base;
+        double from, to, bearing;
+    };
+    std::map<int, Move> moves;       // panels on their way
+    Clock::time_point start;
+    uint64_t universe = 0;
+    double eye[3] = {0, 0, 0}, heading = 0;   // the anchor
+    bool anchored = false;
+    struct timespec anchorTime = {};
+    int64_t checkedMs = 0;
+    posturetilt::Params k;
+    posturetilt::Detector det;
+} g_tilt;
+constexpr double kTiltSeconds = 0.6;
+
+void ReadTiltAnchor() {
+    const char *home = std::getenv("HOME");
+    if (!home) return;
+    const std::string path = std::string(home) + "/.local/state/frametop/layout-anchor.json";
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) return;
+    if (g_tilt.anchored && st.st_mtim.tv_sec == g_tilt.anchorTime.tv_sec && st.st_mtim.tv_nsec == g_tilt.anchorTime.tv_nsec)
+        return;
+    FILE *f = std::fopen(path.c_str(), "r");
+    if (!f) return;
+    char buf[256] = {};
+    buf[std::fread(buf, 1, sizeof buf - 1, f)] = 0;
+    std::fclose(f);
+    double e[3], h;
+    const char *pe = std::strstr(buf, "\"eye\""), *ph = std::strstr(buf, "\"heading\"");
+    const char *bracket = pe ? std::strchr(pe, '[') : nullptr, *colon = ph ? std::strchr(ph, ':') : nullptr;
+    if (!bracket || !colon || std::sscanf(bracket, "[%lf , %lf , %lf", &e[0], &e[1], &e[2]) != 3 || std::sscanf(colon, ": %lf", &h) != 1)
+        return (void)std::printf("tilt: can't read the anchor in %s\n", path.c_str());
+    for (int i = 0; i < 3; ++i) g_tilt.eye[i] = e[i];
+    g_tilt.heading = h, g_tilt.anchored = true, g_tilt.anchorTime = st.st_mtim;
+    std::printf("tilt: anchor %.3f %.3f %.3f, heading %.1f\n", e[0], e[1], e[2], h);
+}
+
+void SetTiltApplied(int i, double deg) {
+    if (std::fabs(deg) < 0.01) g_tilt.applied.erase(i);
+    else g_tilt.applied[i] = deg;
+}
+
+// The moves under way, at their ends now.
+void FinishTilt() {
+    for (auto &[i, mv] : g_tilt.moves) {
+        const auto s = g_screens.find(i);
+        if (s == g_screens.end() || !Spinnable(s->second)) continue;
+        SetAbsolute(s->second, posturetilt::Tilted(mv.base, mv.to - mv.from, g_tilt.eye, mv.bearing), g_tilt.universe);
+        SetTiltApplied(i, mv.to);
+    }
+    g_tilt.moves.clear();
+}
+
+void StartTilt(double to, const char *why) {
+    FinishTilt();
+    g_tilt.target = to;
+    if (!g_tilt.anchored) return (void)std::printf("tilt: %s, but there's no anchor yet: arrange or reset the screens\n", why);
+    int n = 0;
+    for (auto &[i, s] : g_screens) {
+        Mat p;
+        if (!Spinnable(s) || !ScreenPose(s, &p)) continue;
+        const auto a = g_tilt.applied.find(i);
+        const double from = a != g_tilt.applied.end() ? a->second : 0;
+        if (std::fabs(to - from) < 0.01) continue;
+        g_tilt.moves[i] = {p, from, to, posturetilt::BearingOf(p, g_tilt.eye)};
+        ++n;
+    }
+    g_tilt.start = Clock::now(), g_tilt.universe = g_universe;
+    if (n) std::printf("tilt: %s: %d panel(s) to %.0f deg\n", why, n, to);
+}
+
+// A panel placed (an arrange, a reset): level now, and not on its way anywhere.
+void TiltPlaced(int i) {
+    g_tilt.moves.erase(i);
+    g_tilt.applied.erase(i);
+}
+
+void UpdateTilt() {
+    const int64_t now = NowMs();
+    if (now - g_tilt.checkedMs >= 1000) g_tilt.checkedMs = now, ReadTiltAnchor();
+    if (!g_tilt.moves.empty()) {
+        const double t = std::min(1.0, std::chrono::duration<double>(Clock::now() - g_tilt.start).count() / kTiltSeconds);
+        const double e = t * t * (3 - 2 * t);
+        for (auto it = g_tilt.moves.begin(); it != g_tilt.moves.end();) {
+            const auto s = g_screens.find(it->first);
+            const Tilt::Move &mv = it->second;
+            if (s == g_screens.end() || !Spinnable(s->second)) {   // grabbed, pinned or gone: it stays as it is now
+                SetTiltApplied(it->first, mv.from + (mv.to - mv.from) * e);
+                it = g_tilt.moves.erase(it);
+                continue;
+            }
+            SetAbsolute(s->second, posturetilt::Tilted(mv.base, (mv.to - mv.from) * e, g_tilt.eye, mv.bearing), g_tilt.universe);
+            ++it;
+        }
+        if (t >= 1) {
+            for (auto &[i, mv] : g_tilt.moves) SetTiltApplied(i, mv.to);
+            g_tilt.moves.clear();
+        }
+        return;
+    }
+    if (!g_tilt.on || g_tilt.manual || g_tilt.deg <= 0 || !g_tilt.anchored || g_spin.on) return;
+    Mat head;
+    if (!DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head)) return;
+    const double h[3] = {head.m[0][3], head.m[1][3], head.m[2][3]};
+    const double back = posturetilt::BackOf(h, g_tilt.eye, g_tilt.heading);
+    const double dist = std::hypot(h[0] - g_tilt.eye[0], h[1] - g_tilt.eye[1], h[2] - g_tilt.eye[2]);
+    if (g_tilt.det.Update(back, dist, now, g_tilt.k))
+        StartTilt(g_tilt.det.leaned ? -g_tilt.deg : 0, g_tilt.det.leaned ? "leaned back" : "sat up");
+}
+
+// "handsetting SCREEN_TILT down|up|auto|state": down and up as asked (posture waits until auto);
+// auto follows the posture again; each answers with the state.
+void TiltCommand(const char *word, char *reply, int size) {
+    const double deg = g_tilt.deg > 0 ? g_tilt.deg : 15;
+    if (!std::strcmp(word, "down")) {
+        g_tilt.manual = true;
+        StartTilt(-deg, "asked");
+    } else if (!std::strcmp(word, "up")) {
+        g_tilt.manual = true;
+        StartTilt(0, "asked");
+    } else if (!std::strcmp(word, "auto")) {
+        g_tilt.manual = false;
+        g_tilt.det.leaned = g_tilt.target < 0, g_tilt.det.since = -1;   // the posture takes it from as it is
+    } else if (std::strcmp(word, "state")) {
+        return (void)std::snprintf(reply, size, "error handsetting SCREEN_TILT down|up|auto|state|0|1");
+    }
+    double back = 0;
+    Mat head;
+    if (g_tilt.anchored && DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head)) {
+        const double h[3] = {head.m[0][3], head.m[1][3], head.m[2][3]};
+        back = posturetilt::BackOf(h, g_tilt.eye, g_tilt.heading);
+    }
+    std::snprintf(reply, size, "ok SCREEN_TILT %.1f deg, %s, %s, %zu tilted, head %.3f m back, anchor %s", g_tilt.target,
+                  g_tilt.on && g_tilt.deg > 0 ? "on" : "off", g_tilt.manual ? "manual" : "auto", g_tilt.applied.size(), back,
+                  g_tilt.anchored ? "read" : "missing");
+}
+
 uint32_t LinuxButton(uint32_t vrButton) {
     switch (vrButton) {
         case vr::VRMouseButton_Right: return BTN_RIGHT;
@@ -5132,6 +5284,10 @@ bool SetHandSetting(const char *key, bool on) {
     else if (n == "HANDS_PUSH_GLOW") g_pushGlowOn = on;
     else if (n == "HANDS_PALM_MENU") g_palm.params().on = on;
     else if (n == "SCREEN_SPIN_BRING") g_susanBring = on;
+    else if (n == "SCREEN_TILT") {
+        g_tilt.on = on;
+        if (!on && !g_tilt.manual) StartTilt(0, "switched off");
+    }
     else if (n == "SCREEN_FRONT_AWAY") g_frontAway = on;
     else if (n == "SCREEN_PIN_LEVEL") SetPinMode(on ? levelpin::Level : levelpin::Rigid);   // (2, Walk: the command's own case)
     else return false;
@@ -5532,6 +5688,17 @@ bool ft_vr_init(void) {
         g_curveMaxArc = deg * M_PI / 180;
     }
     g_susanBring = handcut::Setting("SCREEN_SPIN_BRING", "1") != "0";
+    num("SCREEN_TILT_DEG", g_tilt.deg, 0, 45);            // the posture tilt: leaning back tilts the panels this far (deg; 0: off)
+    num("SCREEN_TILT_BACK", g_tilt.k.backM, 0.03, 0.5);   // ...the head this far back (m) from where they were arranged
+    {
+        double ms = double(g_tilt.k.leanMs);
+        num("SCREEN_TILT_MS", ms, 100, 10000);   // ...for this long (ms); back within half of it for half as long: level again
+        g_tilt.k.leanMs = int64_t(ms), g_tilt.k.upMs = g_tilt.k.leanMs / 2;
+    }
+    g_tilt.on = handcut::Setting("SCREEN_TILT", "1") != "0";
+    if (g_tilt.deg > 0)
+        std::printf("tilt: leaning back %.0f cm for %.1f s tilts the panels %.0f deg down%s\n", g_tilt.k.backM * 100,
+                    g_tilt.k.leanMs / 1000.0, g_tilt.deg, g_tilt.on ? "" : " (switched off: SCREEN_TILT=0)");
     g_pinMode = levelpin::ModeOf(handcut::Setting("SCREEN_PIN_LEVEL", "0").c_str());   // head pins: 1 level, 2 walking   // the lazy susan brings panels (0: the room turns)
     num("FLOAT_DOCK_DISTANCE", g_floatDockDistance, 0, 1);   // a floating window carried this near a screen docks onto it
     num("SCREEN_SPIN_DISTANCE", g_frontReading, 0.4, 3);   // the front slot's reading distance (m)...
@@ -6722,6 +6889,7 @@ void ft_vr_poll(void (*handle)(const struct ft_event *, void *), void *data) {
     if (g_tick % 9 == 0) UpdateSteamInFront();
     ++g_tick;
     UpdateSpin();
+    UpdateTilt();
     UpdateFront();
     UpdateResetHold();
     if (g_spin.front >= 0) {
@@ -6786,6 +6954,7 @@ static void PanelCommand(vrcmd::Verb verb, vrcmd::Cmd &parsed, const char *cmd, 
         if (!s) return (void)std::snprintf(reply, size, "error no screen %d", n);
         EndDrag(*s);
         g_spin.base.erase(n - 1);
+        TiltPlaced(n - 1);   // placed as the layout has it: level
         SetAbsolute(*s, PanelPose(x, y, z, yaw, pitch, roll));
         std::snprintf(reply, size, "ok");
         return;
@@ -7071,6 +7240,9 @@ static void HelperWordCommand(vrcmd::Verb verb, vrcmd::Cmd &parsed, const char *
     int &rr = parsed.rr;
     switch (verb) {
     case vrcmd::HandSetting: {
+        if (!std::strcmp(key, "SCREEN_TILT") && std::strcmp(word, "0") && std::strcmp(word, "1") && std::strcmp(word, "on") &&
+            std::strcmp(word, "off"))
+            return TiltCommand(word, reply, size);   // down, up, auto, state (0 and 1 go the usual way below)
         if (!std::strcmp(key, "SCREEN_PIN_LEVEL") && (!std::strcmp(word, "2") || !std::strcmp(word, "walk"))) {
             // the third head pin mode (Walk): 0 and 1 go the usual way below
             SetPinMode(levelpin::Walk);

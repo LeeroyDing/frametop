@@ -1,8 +1,8 @@
-# Personal fork: KWin 6.6 scaling and per-network streams
+# Personal fork: KWin 6.6 scaling, per-network streams and the posture tilt
 
 The `personal` branch is based on `kwin-6.6-output-scale` (`3b039d0`): upstream `experimental` (`fdfd96e`, the `v0.3.0` development line) plus the KWin 6.6 nested output scaling commit. Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); this fork is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
 
-Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, and this fork reference.
+Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, the posture tilt, a sturdier way for ft-screens to find its tools, and this fork reference.
 
 ## KWin 6.6 nested output scaling
 
@@ -26,6 +26,22 @@ A stream that goes through the host's own address with route `auto` keeps checki
 - `stream/route_settings.h`: a display's settings for a route, a host's route and direct addresses, and the two-in-a-row rule for switching; `stream/tests/route_settings_test.cpp` tests them (`scripts/test-route-settings.sh`).
 - `stream/ft-stream.cpp`: applies the settings once the route is chosen, before working out the default bitrate, and watches for a direct address while on the host's own (`WatchDirect`).
 - `layout/ft_layout.py`: `remote set ROUTE.fps=F ROUTE.bitrate=KBPS` and `remote list`; `layout/tests/test_remote_routes.py` tests them.
+
+## Posture tilt
+
+`SCREEN_TILT_DEG` in `~/.config/frametop.conf` tilts every panel in the room down round your eyes when you lean back, and back up when you sit up. It suits a video placed above a work screen: sitting up you glance up at it, and leaning back brings it down to where a reclined head looks, with the work screen still in view below it. `0`, the default, turns it off.
+
+- Leaning back means the head at least `SCREEN_TILT_BACK` metres (0.12) behind where the screens were last arranged or reset, measured level along that heading, for `SCREEN_TILT_MS` (1000 ms). Within half that distance for half that time, the panels tilt back. A head more than 0.8 m from that spot changes nothing.
+- The reference is ft-layout's anchor, `~/.local/state/frametop/layout-anchor.json`, which every arrange, reset and capture rewrites. ft-screens reads it again whenever it changes.
+- Each panel turns across its own bearing from the eyes. Panels stacked on one bearing move together, and a panel beside you comes down upright instead of rolling in place. Pinned panels and panels being held stay where they are.
+- A `place` from an arrange or a reset levels the panel it places, so Meta+Shift+R always puts the layout back level.
+- Try it by hand with `handsetting SCREEN_TILT down`, `up`, `auto` or `state` on `@ft_screens`. `down` and `up` hold until `auto`. `handsetting SCREEN_TILT 0` or `1` switches the posture tilt off or on.
+
+`screens/posturetilt.h` holds the lean detector and the tilt geometry, tested by `screens/tests/posturetilt-test.cpp`; `UpdateTilt` and `StartTilt` in `screens/vr.cpp` apply them.
+
+## Finding ft-screens' tools
+
+ft-screens starts `layout/ft-layout` (the reset button, `scale` after a move) from its own install folder. It now finds that folder once, at start. Before, it looked again for every run through `/proc/self/exe`, and once an update replaced the program on disk while it ran (`scripts/fast-install --no-restart`), that path named a deleted file. Every reset button press then did nothing, with nothing logged, until the desktop restarted.
 
 ## Upstream integration
 
@@ -51,6 +67,7 @@ Run these offline checks from the checkout. The route-settings test requires a C
 ```sh
 ./scripts/test-screen-scale.sh
 ./scripts/test-route-settings.sh
+g++ -std=c++17 -Wall -Wextra -Werror screens/tests/posturetilt-test.cpp -o /tmp/posturetilt-test && /tmp/posturetilt-test
 python3 -m unittest discover -s layout/tests -v
 python3 -m unittest discover -s layout/countdown/tests -v
 git diff --check
