@@ -49,25 +49,40 @@ int main() {
         check("back: along a turned heading", near(BackOf(west, eye, 90), 0.15));
     }
 
-    // leaning back: the head far enough back for leanMs; sitting up: within half of it for upMs
+    // leaning back: backM farther back than where the head sits upright, for leanMs; sitting up: within half
+    // of it for upMs. The head sits 5 cm behind the anchor here, as it did in the live test.
     {
         Params k;
         Detector d;
-        check("lean: not at once", !d.Update(0.15, 0.2, 0, k) && !d.leaned);
-        check("lean: not before leanMs", !d.Update(0.15, 0.2, 900, k) && !d.leaned);
-        check("lean: at leanMs", d.Update(0.15, 0.2, 1000, k) && d.leaned);
-        check("lean: between half and full stays leaned", !d.Update(0.08, 0.1, 5000, k) && d.leaned);
-        check("sit up: within half, not at once", !d.Update(0.04, 0.05, 6000, k) && d.leaned);
-        check("sit up: a lean back in between starts over", !d.Update(0.09, 0.1, 6300, k) && d.leaned);
-        check("sit up: within half again", !d.Update(0.02, 0.05, 6400, k) && d.leaned);
-        check("sit up: at upMs", d.Update(0.02, 0.05, 6900, k) && !d.leaned);
+        check("upright: learned at the first look", !d.Update(0.05, 0.1, 0, k) && near(d.upright, 0.05));
+        check("lean: not at once", !d.Update(0.13, 0.15, 100, k) && !d.leaned);
+        check("lean: not before leanMs", !d.Update(0.13, 0.15, 800, k) && !d.leaned);
+        check("lean: at leanMs", d.Update(0.13, 0.15, 900, k) && d.leaned);
+        check("lean: between half and full stays leaned", !d.Update(0.10, 0.12, 5000, k) && d.leaned);
+        check("sit up: within half, not at once", !d.Update(0.06, 0.08, 6000, k) && d.leaned);
+        check("sit up: a lean in between starts over", !d.Update(0.12, 0.13, 6200, k) && !d.Update(0.06, 0.08, 6300, k) && d.leaned);
+        check("sit up: at upMs", d.Update(0.06, 0.08, 6700, k) && !d.leaned);
+        check("upright: not moved by the lean", near(d.upright, 0.05));
         Detector e;
-        e.Update(0.15, 0.2, 0, k);
-        check("lean: a dip back under it starts over", !e.Update(0.05, 0.1, 600, k) && !e.Update(0.15, 0.2, 700, k) &&
-                                                       !e.Update(0.15, 0.2, 1500, k) && e.Update(0.15, 0.2, 1700, k));
+        e.Update(0.05, 0.1, 0, k);
+        e.Update(0.13, 0.15, 100, k);
+        check("lean: a dip back under it starts over", !e.Update(0.07, 0.1, 600, k) && !e.Update(0.13, 0.15, 700, k) &&
+                                                       !e.Update(0.13, 0.15, 1400, k) && e.Update(0.13, 0.15, 1500, k));
+        // where the head sits upright follows it slowly, so a lean counts from how you sit now
+        Detector s;
+        s.Update(0.0, 0.1, 0, k);
+        for (int t = 1; t <= 600; ++t) s.Update(0.05, 0.1, t * 100, k);   // a minute 5 cm farther back
+        check("upright: follows where the head sits", near(s.upright, 0.05, 0.005) && !s.leaned);
+        check("lean: from there, 5 cm more is not leaning back",
+              !s.Update(0.10, 0.12, 60100, k) && !s.Update(0.10, 0.12, 61500, k) && !s.leaned);
+        check("lean: 8 cm more is", !s.Update(0.13, 0.15, 62000, k) && s.Update(0.13, 0.15, 62800, k) && s.leaned);
         Detector f;
-        f.Update(0.3, 1.0, 0, k);
-        check("far from the anchor: nothing", !f.Update(0.3, 1.0, 2000, k) && !f.leaned);
+        f.Update(0.05, 0.1, 0, k);
+        check("far from the anchor: nothing", !f.Update(0.3, 1.0, 100, k) && !f.Update(0.3, 1.0, 2000, k) && !f.leaned);
+        Detector r;
+        r.Update(0.05, 0.1, 0, k);
+        r.Rebase();
+        check("a new anchor: learned again", !r.Update(0.20, 0.25, 100, k) && near(r.upright, 0.20) && !r.leaned);
     }
 
     // the tilt: round the eyes, down across the panel's bearing, keeping its distance and facing you

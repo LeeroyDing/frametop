@@ -7,16 +7,18 @@
 // Header only, no OpenVR, so its test runs anywhere (screens/tests/posturetilt-test.cpp).
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
 namespace posturetilt {
 
 struct Params {
-    double backM = 0.12;     // SCREEN_TILT_BACK: the head this far back from the anchor's eyes (level) leans back
-    int64_t leanMs = 1000;   // SCREEN_TILT_MS: ...for this long tilts down
-    int64_t upMs = 500;      // back within half of backM for this long tilts up again
+    double backM = 0.07;     // SCREEN_TILT_BACK: the head this much farther back than where it sits upright leans back
+    int64_t leanMs = 800;    // SCREEN_TILT_MS: ...for this long tilts down
+    int64_t upMs = 400;      // back within half of backM for this long tilts up again
     double farM = 0.8;       // farther from the anchor's eyes (walked off, the room moved): neither
+    double settleS = 20;     // while upright, where the head sits follows it this slowly (time constant, s)
 };
 
 // How far back the head is from the anchor's eyes, level, along the anchor's heading (metres; forward is
@@ -27,16 +29,29 @@ inline double BackOf(const double head[3], const double eye[3], double headingDe
     return -((head[0] - eye[0]) * fx + (head[2] - eye[2]) * fz);
 }
 
-// Leaning back or sitting up: a dwell each way, and half the distance back to sit up again, so a head
-// near the line doesn't flicker between them.
+// Leaning back or sitting up, measured from where the head sits upright, learned while it does (user,
+// 2026-11-10: the anchor is wherever a reset caught the head, 5 cm forward of how he sits, so leaning
+// back from his own posture barely reached 12 cm from it): a dwell each way, and half the distance
+// back to sit up again, so a head near the line doesn't flicker between them.
 struct Detector {
     bool leaned = false;
-    int64_t since = -1;   // when the other posture began (-1: it hasn't)
+    int64_t since = -1;     // when the other posture began (-1: it hasn't)
+    bool based = false;     // `upright` is known
+    double upright = 0;     // where the head sits upright (as BackOf), followed slowly while it does
+    int64_t lastMs = -1;
+    void Rebase() { based = false; }   // a new anchor: learn where the head sits again
     // True when `leaned` changed. back: BackOf; dist: how far the head is from the anchor's eyes.
     bool Update(double back, double dist, int64_t nowMs, const Params &k) {
+        const double dt = lastMs < 0 ? 0 : (nowMs - lastMs) / 1000.0;
+        lastMs = nowMs;
         if (dist > k.farM) return since = -1, false;
-        const bool other = leaned ? back <= k.backM / 2 : back >= k.backM;
-        if (!other) return since = -1, false;
+        if (!based) upright = back, based = true;
+        const double rel = back - upright;
+        const bool other = leaned ? rel <= k.backM / 2 : rel >= k.backM;
+        if (!other) {
+            if (!leaned && k.settleS > 0) upright += (back - upright) * std::min(1.0, dt / k.settleS);
+            return since = -1, false;
+        }
         if (since < 0) since = nowMs;
         if (nowMs - since < (leaned ? k.upMs : k.leanMs)) return false;
         leaned = !leaned, since = -1;

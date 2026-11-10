@@ -2679,6 +2679,7 @@ void ReadTiltAnchor() {
         return (void)std::printf("tilt: can't read the anchor in %s\n", path.c_str());
     for (int i = 0; i < 3; ++i) g_tilt.eye[i] = e[i];
     g_tilt.heading = h, g_tilt.anchored = true, g_tilt.anchorTime = st.st_mtim;
+    g_tilt.det.Rebase();   // back is measured from it: learn where the head sits upright again
     std::printf("tilt: anchor %.3f %.3f %.3f, heading %.1f\n", e[0], e[1], e[2], h);
 }
 
@@ -2777,9 +2778,30 @@ void TiltCommand(const char *word, char *reply, int size) {
         const double h[3] = {head.m[0][3], head.m[1][3], head.m[2][3]};
         back = posturetilt::BackOf(h, g_tilt.eye, g_tilt.heading);
     }
-    std::snprintf(reply, size, "ok SCREEN_TILT %.1f deg, %s, %s, %zu tilted, head %.3f m back, anchor %s", g_tilt.target,
-                  g_tilt.on && g_tilt.deg > 0 ? "on" : "off", g_tilt.manual ? "manual" : "auto", g_tilt.applied.size(), back,
-                  g_tilt.anchored ? "read" : "missing");
+    std::snprintf(reply, size, "ok SCREEN_TILT %.1f deg, %s, %s, %zu tilted, head %.3f m back of upright (%.3f from the anchor), "
+                  "lean %.2f m for %lld ms, anchor %s", g_tilt.target, g_tilt.on && g_tilt.deg > 0 ? "on" : "off",
+                  g_tilt.manual ? "manual" : "auto", g_tilt.applied.size(), back - g_tilt.det.upright, back, g_tilt.k.backM,
+                  (long long)g_tilt.k.leanMs, g_tilt.anchored ? "read" : "missing");
+}
+
+// "handsetting SCREEN_TILT_DEG|SCREEN_TILT_BACK|SCREEN_TILT_MS <number>": the tilt's settings now, to try
+// them without a restart (frametop.conf keeps them for the next start).
+void TiltSetting(const char *key, const char *word, char *reply, int size) {
+    char *end;
+    const double v = std::strtod(word, &end);
+    const bool num = end != word && !*end;
+    if (num && !std::strcmp(key, "SCREEN_TILT_DEG") && v >= 0 && v <= 45) {
+        g_tilt.deg = v;
+        if (g_tilt.target < 0) StartTilt(-v, "a new angle");   // tilted now: to the new angle
+    } else if (num && !std::strcmp(key, "SCREEN_TILT_BACK") && v >= 0.03 && v <= 0.5) {
+        g_tilt.k.backM = v;
+    } else if (num && !std::strcmp(key, "SCREEN_TILT_MS") && v >= 100 && v <= 10000) {
+        g_tilt.k.leanMs = int64_t(v), g_tilt.k.upMs = g_tilt.k.leanMs / 2;
+    } else {
+        return (void)std::snprintf(reply, size, "error handsetting SCREEN_TILT_DEG 0-45 | SCREEN_TILT_BACK 0.03-0.5 | SCREEN_TILT_MS 100-10000");
+    }
+    std::printf("tilt: %s %s (handsetting)\n", key, word);
+    std::snprintf(reply, size, "ok %s %s", key, word);
 }
 
 uint32_t LinuxButton(uint32_t vrButton) {
@@ -5689,7 +5711,7 @@ bool ft_vr_init(void) {
     }
     g_susanBring = handcut::Setting("SCREEN_SPIN_BRING", "1") != "0";
     num("SCREEN_TILT_DEG", g_tilt.deg, 0, 45);            // the posture tilt: leaning back tilts the panels this far (deg; 0: off)
-    num("SCREEN_TILT_BACK", g_tilt.k.backM, 0.03, 0.5);   // ...the head this far back (m) from where they were arranged
+    num("SCREEN_TILT_BACK", g_tilt.k.backM, 0.03, 0.5);   // ...the head this much farther back (m) than where it sits upright
     {
         double ms = double(g_tilt.k.leanMs);
         num("SCREEN_TILT_MS", ms, 100, 10000);   // ...for this long (ms); back within half of it for half as long: level again
@@ -5697,7 +5719,7 @@ bool ft_vr_init(void) {
     }
     g_tilt.on = handcut::Setting("SCREEN_TILT", "1") != "0";
     if (g_tilt.deg > 0)
-        std::printf("tilt: leaning back %.0f cm for %.1f s tilts the panels %.0f deg down%s\n", g_tilt.k.backM * 100,
+        std::printf("tilt: leaning %.0f cm farther back than you sit for %.1f s tilts the panels %.0f deg down%s\n", g_tilt.k.backM * 100,
                     g_tilt.k.leanMs / 1000.0, g_tilt.deg, g_tilt.on ? "" : " (switched off: SCREEN_TILT=0)");
     g_pinMode = levelpin::ModeOf(handcut::Setting("SCREEN_PIN_LEVEL", "0").c_str());   // head pins: 1 level, 2 walking   // the lazy susan brings panels (0: the room turns)
     num("FLOAT_DOCK_DISTANCE", g_floatDockDistance, 0, 1);   // a floating window carried this near a screen docks onto it
@@ -7240,6 +7262,7 @@ static void HelperWordCommand(vrcmd::Verb verb, vrcmd::Cmd &parsed, const char *
     int &rr = parsed.rr;
     switch (verb) {
     case vrcmd::HandSetting: {
+        if (!std::strncmp(key, "SCREEN_TILT_", 12)) return TiltSetting(key, word, reply, size);   // a number for one of its settings
         if (!std::strcmp(key, "SCREEN_TILT") && std::strcmp(word, "0") && std::strcmp(word, "1") && std::strcmp(word, "on") &&
             std::strcmp(word, "off"))
             return TiltCommand(word, reply, size);   // down, up, auto, state (0 and 1 go the usual way below)

@@ -31,11 +31,12 @@ A stream that goes through the host's own address with route `auto` keeps checki
 
 `SCREEN_TILT_DEG` in `~/.config/frametop.conf` tilts every panel in the room down round your eyes when you lean back, and back up when you sit up. It suits a video placed above a work screen: sitting up you glance up at it, and leaning back brings it down to where a reclined head looks, with the work screen still in view below it. `0`, the default, turns it off.
 
-- Leaning back means the head at least `SCREEN_TILT_BACK` metres (0.12) behind where the screens were last arranged or reset, measured level along that heading, for `SCREEN_TILT_MS` (1000 ms). Within half that distance for half that time, the panels tilt back. A head more than 0.8 m from that spot changes nothing.
-- The reference is ft-layout's anchor, `~/.local/state/frametop/layout-anchor.json`, which every arrange, reset and capture rewrites. ft-screens reads it again whenever it changes.
+- Leaning back means the head at least `SCREEN_TILT_BACK` metres (0.07) farther back than where it sits upright, measured level along the heading the screens were arranged with, for `SCREEN_TILT_MS` (800 ms). Back within half that distance for half that time, the panels tilt back. A head more than 0.8 m from the arranged spot changes nothing.
+- Where the head sits upright is learned while it does, following slow changes over about 20 seconds and ignoring leans. Measuring from the arranged spot alone was unreliable: a reset catches the head wherever it happens to be, 5 cm forward of how Leeroy sits in the live test, so leaning back from his own posture barely reached the old 12 cm.
+- The reference is ft-layout's anchor, `~/.local/state/frametop/layout-anchor.json`, which every arrange, reset and capture rewrites. ft-screens reads it again whenever it changes and learns the upright place anew.
 - Each panel turns across its own bearing from the eyes. Panels stacked on one bearing move together, and a panel beside you comes down upright instead of rolling in place. Pinned panels and panels being held stay where they are.
 - A `place` from an arrange or a reset levels the panel it places, so Meta+Shift+R always puts the layout back level.
-- Try it by hand with `handsetting SCREEN_TILT down`, `up`, `auto` or `state` on `@ft_screens`. `down` and `up` hold until `auto`. `handsetting SCREEN_TILT 0` or `1` switches the posture tilt off or on.
+- Try it by hand with `handsetting SCREEN_TILT down`, `up`, `auto` or `state` on `@ft_screens`. `down` and `up` hold until `auto`. `handsetting SCREEN_TILT 0` or `1` switches the posture tilt off or on, and `handsetting SCREEN_TILT_DEG`, `SCREEN_TILT_BACK` or `SCREEN_TILT_MS` with a number changes that setting until the next start.
 
 `screens/posturetilt.h` holds the lean detector and the tilt geometry, tested by `screens/tests/posturetilt-test.cpp`; `UpdateTilt` and `StartTilt` in `screens/vr.cpp` apply them.
 
