@@ -1717,18 +1717,33 @@ void EndDrag(Screen &s) {
     if (moved) FitCurve(s);
 }
 
+// Our tree (<repo>/screens/build/ft-screens -> <repo>), found once, at start (ft_vr_init): an update
+// that replaces this program on disk while it runs (fast-install --no-restart) leaves /proc/self/exe
+// naming a deleted file, which realpath can't resolve (user, 2026-11-10: the reset button did nothing
+// until the desktop restarted). Empty if it couldn't be found.
+const std::string &ToolRoot() {
+    static std::string root;
+    static bool looked = false;
+    if (!looked) {
+        looked = true;
+        char exe[PATH_MAX];
+        if (realpath("/proc/self/exe", exe)) {
+            root = exe;
+            for (int up = 0; up < 3 && root.rfind('/') != std::string::npos; ++up) root.resize(root.rfind('/'));
+        }
+    }
+    return root;
+}
+
 // Run one of Frametop's tools, `<repo>/<tool> <arg>`, in the background. log: its output goes
 // there, in the host's runtime directory (XDG_RUNTIME_DIR, not the nested desktop's; else /tmp
 // with O_NOFOLLOW: a symlink there must not be followed); null: to ours.
 void RunTool(const char *tool, const char *arg, const char *log) {
     if (g_beside) return;
-    char exe[PATH_MAX];
-    if (!realpath("/proc/self/exe", exe)) return;
+    if (ToolRoot().empty()) return (void)std::printf("can't run %s %s: ft-screens couldn't find its own folder\n", tool, arg);
     const char *runtime = std::getenv("XDG_RUNTIME_DIR");
     std::string logname = log ? std::string(runtime && *runtime ? runtime : "/tmp") + "/" + log : "ours";
-    std::string path(exe);  // <repo>/screens/build/ft-screens -> <repo>/<tool>
-    for (int up = 0; up < 3 && path.rfind('/') != std::string::npos; ++up) path.resize(path.rfind('/'));
-    path += std::string("/") + tool;
+    std::string path = ToolRoot() + "/" + tool;
     posix_spawn_file_actions_t io;
     posix_spawn_file_actions_init(&io);
     posix_spawn_file_actions_addopen(&io, 0, "/dev/null", O_RDONLY, 0);
@@ -5377,6 +5392,7 @@ void UpdateSteamInFront() {
 extern "C" {
 
 bool ft_vr_init(void) {
+    if (ToolRoot().empty()) std::printf("can't find ft-screens' own folder: its tools (ft-layout) won't run\n");
     vr::EVRInitError err = vr::VRInitError_None;
     vr::VR_Init(&err, vr::VRApplication_Background);
     if (err == vr::VRInitError_None) {
