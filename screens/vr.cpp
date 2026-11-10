@@ -3499,6 +3499,9 @@ struct Front {
     bool kept = false;       // used long enough: it stays when you look away
 } g_front;
 bool g_susanBring = true;
+bool g_susanCover = false;   // SCREEN_SPIN_BRING=2: the lazy susan covers the screen ahead instead (SusanCover)
+constexpr double kCoverGap = 0.15;      // the cover sits this much nearer than the screen it covers (m)
+constexpr double kCoverMargin = 1.03;   // ...and this much bigger, so none of that one shows round it
 double g_frontReading = 1.0, g_frontDrop = 0.08;   // reading distance (m), and how far under the eyes its centre sits
 double g_frontKeepMs = 3000;                       // SCREEN_FRONT_KEEP_MS: this much use keeps it (0: never)
 // Turned away from, it goes home (SCREEN_FRONT_AWAY=1). Off since the user's 2026-10-11 call: "the lazy susan can
@@ -3580,6 +3583,18 @@ void FrontHome(const char *why) {
     g_front = {};
 }
 
+// Screen i, now at `now`, takes the slot: that's its home, and typing and the active window go to it.
+void IntoSlot(int i, const Screen &s, const Mat &now) {
+    const auto m = g_grabMoves.find(i);   // (on its way home: home is where it was going)
+    g_front = {};
+    g_front.panel = i;
+    g_front.home = m != g_grabMoves.end() ? m->second.to : now;
+    g_front.homeUniverse = m != g_grabMoves.end() ? m->second.universe : s.universe;
+    g_front.homeWidth = m != g_grabMoves.end() ? m->second.w1 : s.metres, g_front.homeCurve = s.curve;
+    g_spin.front = i;   // typing and the active window go to it (ft_vr_poll: FT_FRONT)
+    SendPointer("recenter");
+}
+
 // Screen i at `to` (facing you), as big as it reads there: to the slot (the one there goes home first),
 // or (slot false: grab that) outside it, the slot's one going home first unless it's released.
 void BringReadable(int i, const Mat &to, bool slot, const char *why) {
@@ -3593,14 +3608,7 @@ void BringReadable(int i, const Mat &to, bool slot, const char *why) {
         if (g_front.panel == i) g_front.released = true;   // (grab that at the slot's one: a manual control)
         RememberPlace(i, s);
     } else if (g_front.panel != i) {
-        const auto m = g_grabMoves.find(i);   // (on its way home: home is where it was going)
-        g_front = {};
-        g_front.panel = i;
-        g_front.home = m != g_grabMoves.end() ? m->second.to : now;
-        g_front.homeUniverse = m != g_grabMoves.end() ? m->second.universe : s.universe;
-        g_front.homeWidth = m != g_grabMoves.end() ? m->second.w1 : s.metres, g_front.homeCurve = s.curve;
-        g_spin.front = i;   // typing and the active window go to it (ft_vr_poll: FT_FRONT)
-        SendPointer("recenter");
+        IntoSlot(i, s, now);
     }
     double head[3] = {0, 0, 0};
     Mat hp;
@@ -3613,6 +3621,29 @@ void BringReadable(int i, const Mat &to, bool slot, const char *why) {
     std::printf("%s: screen %d %s (%s), %.2f m out, %.2f m wide%s (%.0fx%.0f deg, %.0f px/deg)\n", slot ? "front" : "grab that", i + 1,
                 slot ? "to the front" : "to arm's reach", why, d, r.width, s.curve > 0 ? ", curved round you" : "", r.degW, r.degH, r.ppd);
     if (slot) ShowCarousel();
+}
+
+// The lazy susan's cover: screen i in the slot over screen `under` (grabthat::CoverPlace), which stays
+// where it is. Home, as from the slot, is where i lived (FrontHome).
+void CoverWith(int i, int under, const char *why) {
+    const auto it = g_screens.find(i), ut = g_screens.find(under);
+    Mat up, now, head;
+    if (it == g_screens.end() || ut == g_screens.end() || !ScreenPose(ut->second, &up) || !ScreenPose(it->second, &now) ||
+        !DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head))
+        return;
+    Screen &s = it->second;
+    const Screen &u = ut->second;
+    if (g_front.panel >= 0 && g_front.panel != i) FrontHome("another comes");
+    if (g_front.panel != i) IntoSlot(i, s, now);
+    const double pxW = s.floating ? s.cropW : s.width, pxH = s.floating ? s.cropH : s.height;
+    const grabthat::Cover c = grabthat::CoverPlace(up, u.metres, u.heightMetres(), u.curve, Apart(head, up),
+                                                   pxW > 0 ? pxH / pxW : 0, kCoverGap, kCoverMargin);
+    if (!s.floating) s.curve = c.curve;
+    g_front.to = c.to, g_front.width = c.width, g_front.awaySinceMs = -1;
+    StartGrabMove(i, s, c.to, c.width);
+    std::printf("front: screen %d over screen %d (%s), %.2f m wide%s\n", i + 1, under + 1, why, c.width,
+                s.curve > 0 ? ", curved round you" : "");
+    ShowCarousel();
 }
 
 // A manual control took the slot's screen: it's yours until the next stroke puts it home.
@@ -4033,9 +4064,47 @@ void UpdateGrabThat(const handinput::Input &in) {
     AnimateGrabMoves();
 }
 
+// The lazy susan's cover (SCREEN_SPIN_BRING=2; user, 2026-11-10: a video on the Frame's desktop while working
+// on the Mac, "easily switch back and forth", without the room turning and drifting): a stroke brings the next
+// screen round on its side over the one nearest straight ahead, which never moves; the next stroke, either way,
+// sends it home. Two states, so a stroke the other way round still does what was meant.
+void SusanCover(bool next, char *reply, int size) {
+    if (g_front.panel >= 0) {
+        const int i = g_front.panel;
+        FrontHome(next ? "the lazy susan, next" : "the lazy susan, back");
+        return (void)std::snprintf(reply, size, "ok screen %d home", i + 1);
+    }
+    Mat head;
+    if (!DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head))
+        return (void)std::snprintf(reply, size, "error no head pose (headset off?)");
+    const std::vector<grabthat::Bearing> order = CarouselOrder(head);
+    const int under = grabthat::CoverUnder(order);
+    double from = 0;
+    for (const grabthat::Bearing &b : order)
+        if (b.index == under) from = b.deg;
+    const int i = under < 0 ? -1 : grabthat::SusanPick(order, under, from, next, kSpinAhead);
+    if (i < 0) return (void)std::snprintf(reply, size, "ok 0 (no other panel)");
+    CoverWith(i, under, next ? "the lazy susan, next" : "the lazy susan, back");
+    std::snprintf(reply, size, "ok screen %d over %d", i + 1, under + 1);
+}
+
+// "spin to N" while the lazy susan covers: panel N over the one nearest straight ahead (the one over it now
+// going home first); N being that one, whatever covers it goes home.
+void SusanCoverTo(int i, const Mat &head, char *reply, int size) {
+    if (g_front.panel == i) return (void)std::snprintf(reply, size, "ok screen %d", i + 1);
+    const int under = grabthat::CoverUnder(CarouselOrder(head));   // (the slot's one by where it lives)
+    if (under < 0 || under == i) {
+        if (g_front.panel >= 0) FrontHome("spin to");
+        return (void)std::snprintf(reply, size, "ok screen %d", i + 1);
+    }
+    CoverWith(i, under, "spin to");
+    std::snprintf(reply, size, "ok screen %d over %d", i + 1, under + 1);
+}
+
 // The lazy susan (a stroke, Meta+Alt+Tab: "spin next|prev"): the next screen round, by where each one
 // lives, to the slot at reading distance (see "the front slot" above).
 void SusanCommand(bool next, char *reply, int size) {
+    if (g_susanCover) return SusanCover(next, reply, size);
     Mat head;
     if (!DevicePose(vr::k_unTrackedDeviceIndex_Hmd, &head))
         return (void)std::snprintf(reply, size, "error no head pose (headset off?)");
@@ -4054,6 +4123,7 @@ void SusanCommand(bool next, char *reply, int size) {
 }
 // "spin to N" (frunner) while the lazy susan brings: panel N to the front slot, the rest stay put.
 void SusanBring(int i, const Mat &head, char *reply, int size) {
+    if (g_susanCover) return SusanCoverTo(i, head, reply, size);
     if (g_front.panel != i) {
         if (g_front.released) FrontHome("restored by spin to");
         BringReadable(i, grabthat::InFront(head, FrontDistance(i), g_frontDrop), true, "spin to");
@@ -5116,7 +5186,7 @@ bool SetHandSetting(const char *key, bool on) {
     else if (n == "HANDS_TARGET_GLOW") g_targetGlowOn = on;
     else if (n == "HANDS_PUSH_GLOW") g_pushGlowOn = on;
     else if (n == "HANDS_PALM_MENU") g_palm.params().on = on;
-    else if (n == "SCREEN_SPIN_BRING") g_susanBring = on;
+    else if (n == "SCREEN_SPIN_BRING") g_susanBring = on, g_susanCover = false;   // (2, the cover: the command's own case)
     else if (n == "SCREEN_FRONT_AWAY") g_frontAway = on;
     else if (n == "SCREEN_PIN_LEVEL") SetPinMode(on ? levelpin::Level : levelpin::Rigid);   // (2, Walk: the command's own case)
     else return false;
@@ -5515,7 +5585,11 @@ bool ft_vr_init(void) {
         num("SCREEN_CURVE_MAX_DEG", deg, 20, 300);   // a curved screen bends at most this far round (CapCurve)
         g_curveMaxArc = deg * M_PI / 180;
     }
-    g_susanBring = handcut::Setting("SCREEN_SPIN_BRING", "1") != "0";
+    {
+        const std::string bring = handcut::Setting("SCREEN_SPIN_BRING", "1");
+        g_susanBring = bring != "0";
+        g_susanCover = bring == "2" || bring == "cover";   // the lazy susan covers the screen ahead (SusanCover)
+    }
     g_pinMode = levelpin::ModeOf(handcut::Setting("SCREEN_PIN_LEVEL", "0").c_str());   // head pins: 1 level, 2 walking   // the lazy susan brings panels (0: the room turns)
     num("FLOAT_DOCK_DISTANCE", g_floatDockDistance, 0, 1);   // a floating window carried this near a screen docks onto it
     num("SCREEN_SPIN_DISTANCE", g_frontReading, 0.4, 3);   // the front slot's reading distance (m)...
@@ -5541,7 +5615,9 @@ bool ft_vr_init(void) {
     }
     std::printf("front slot: %s; reading %.2f m, readable at %.0f px/deg (at most %.0fx%.0f deg, ultrawides %.0f wide), arm's reach by grab that; "
                 "home on the next stroke%s\n",
-                g_susanBring ? "the lazy susan brings the next screen to it" : "the lazy susan turns the room (SCREEN_SPIN_BRING=0)",
+                g_susanCover   ? "the lazy susan brings the next screen over the one ahead (SCREEN_SPIN_BRING=2)"
+                : g_susanBring ? "the lazy susan brings the next screen to it"
+                               : "the lazy susan turns the room (SCREEN_SPIN_BRING=0)",
                 g_frontReading, g_frontRead.ppd, g_frontRead.maxW, g_frontRead.maxH, g_frontRead.maxWideW,
                 g_frontAway ? (", or turned from (kept after " + std::to_string(g_frontKeepMs / 1000).substr(0, 3) + " s of use)").c_str()
                             : "; it stays until you move it (SCREEN_FRONT_AWAY=0)");
@@ -7059,6 +7135,13 @@ static void HelperWordCommand(vrcmd::Verb verb, vrcmd::Cmd &parsed, const char *
             // the third head pin mode (Walk): 0 and 1 go the usual way below
             SetPinMode(levelpin::Walk);
             std::printf("screens: SCREEN_PIN_LEVEL 2, walking head pins (Display Settings)\n");
+            std::snprintf(reply, size, "ok %s 2", key);
+            return;
+        }
+        if (!std::strcmp(key, "SCREEN_SPIN_BRING") && (!std::strcmp(word, "2") || !std::strcmp(word, "cover"))) {
+            // the lazy susan's cover (SusanCover): 0 and 1 go the usual way below
+            g_susanBring = g_susanCover = true;
+            std::printf("hands: SCREEN_SPIN_BRING 2, the lazy susan covers the screen ahead\n");
             std::snprintf(reply, size, "ok %s 2", key);
             return;
         }

@@ -456,4 +456,25 @@ double OffLineDeg(const Mat &head, const Mat &a, const Mat &b) {
 
 double LevelDistance(const Mat &head, const Mat &p) { return std::hypot(p.m[0][3] - head.m[0][3], p.m[2][3] - head.m[2][3]); }
 
+int CoverUnder(const std::vector<Bearing> &panels) {
+    int best = -1;
+    double bestDeg = 1e9;
+    for (const Bearing &b : panels)
+        if (std::fabs(b.deg) < bestDeg) bestDeg = std::fabs(b.deg), best = b.index;
+    return best;
+}
+
+Cover CoverPlace(const Mat &under, double underWidth, double underHeight, double underCurve, double distance,
+                 double aspect, double gap, double margin) {
+    Cover c;
+    c.to = under;
+    for (int i = 0; i < 3; ++i) c.to.m[i][3] = float(under.m[i][3] + gap * under.m[i][2]);
+    const double r = underCurve > 0 ? underCurve : distance;
+    const double k = r > gap + 0.05 ? (r - gap) / r : 1;   // (as big in view, that much nearer)
+    const double w = aspect > 0 ? std::max(underWidth, underHeight / aspect) : underWidth;
+    c.width = w * k * margin;
+    c.curve = underCurve > 0 ? std::max(0.05, underCurve - gap) : 0;
+    return c;
+}
+
 }  // namespace grabthat

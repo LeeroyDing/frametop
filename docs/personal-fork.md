@@ -1,8 +1,20 @@
-# Personal fork: KWin 6.6 scaling and per-network streams
+# Personal fork: KWin 6.6 scaling, per-network streams and the Lazy Susan cover
 
 The `personal` branch is based on `kwin-6.6-output-scale` (`3b039d0`): upstream `experimental` (`fdfd96e`, the `v0.3.0` development line) plus the KWin 6.6 nested output scaling commit. Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); this fork is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
 
-Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, and this fork reference.
+Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, the Lazy Susan cover, and this fork reference.
+
+## Lazy Susan cover
+
+`SCREEN_SPIN_BRING=2` in `~/.config/frametop.conf` adds a third Lazy Susan mode for switching between two screens without moving the one you work on. It suits a video on the Frame's own desktop beside a Mac remote display.
+
+- A sweep, Meta+Alt+Tab or `spin next|prev` brings the next screen on that side over the screen nearest straight ahead. The cover sits 15 cm nearer and appears 3% larger, so none of the screen behind shows round it. A curved screen is curved round the same centre.
+- The next sweep, in either direction, sends the cover back to where it lives. The screen ahead never moves, so the arrangement does not drift and no reset is needed.
+- `spin to N` puts screen N over the screen ahead. If N is the screen ahead, whatever covers it goes home.
+- The cover uses the front slot's state: Meta+Shift+R or the reset button sends it home, and moving it by hand or laser leaves it where you put it until the next sweep.
+- Apply it live with `handsetting SCREEN_SPIN_BRING 2` on `@ft_screens`. Frametop Input Settings' Lazy Susan switch writes only 0 or 1, so using that switch turns the cover off.
+
+`grabthat::CoverUnder` and `grabthat::CoverPlace` (`screens/grabthat.cpp`) hold the choice and geometry, tested by `TestCover` in `screens/tests/handinput_test.cpp`; `SusanCover` and `CoverWith` in `screens/vr.cpp` apply them.
 
 ## KWin 6.6 nested output scaling
 
@@ -51,6 +63,7 @@ Run these offline checks from the checkout. The route-settings test requires a C
 ```sh
 ./scripts/test-screen-scale.sh
 ./scripts/test-route-settings.sh
+./scripts/test-handinput.sh            # includes the Lazy Susan cover (TestCover)
 python3 -m unittest discover -s layout/tests -v
 python3 -m unittest discover -s layout/countdown/tests -v
 git diff --check

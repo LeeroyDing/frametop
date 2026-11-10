@@ -278,4 +278,19 @@ double OffLineDeg(const Mat &head, const Mat &a, const Mat &b);
 // How far out p is from the eyes, level (as InFront's distance).
 double LevelDistance(const Mat &head, const Mat &p);
 
+// The lazy susan's cover (SCREEN_SPIN_BRING=2; user, 2026-11-10: a video on the Frame's desktop while
+// working on the Mac, "easily switch back and forth"): a stroke brings the next panel round over the one
+// nearest straight ahead, which never moves. CoverUnder: that one (-1: none). CoverPlace: where the
+// cover goes, `gap` m nearer along the front of `under` (its +z faces you), as big as `under` looks
+// from its centre of curve (from the eyes, `distance` m out, when flat) and at least as wide and as
+// tall as it for the cover's own shape (`aspect`, its height over its width), times `margin`, so none
+// of it shows round the cover. Curved over curved, round the same centre; flat over flat.
+struct Cover {
+    Mat to{};
+    double width = 0, curve = 0;   // metres (along the arc when curved); curve: radius, 0 flat
+};
+int CoverUnder(const std::vector<Bearing> &panels);
+Cover CoverPlace(const Mat &under, double underWidth, double underHeight, double underCurve, double distance,
+                 double aspect, double gap, double margin);
+
 }  // namespace grabthat

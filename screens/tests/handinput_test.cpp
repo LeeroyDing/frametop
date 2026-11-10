@@ -4113,6 +4113,43 @@ void TestSusanPick() {
     CHECK(grabthat::SusanPick({{2, 5}}, 2, 5, true, 8) == -1);    // only the brought one: nothing
 }
 
+void TestCover() {
+    using grabthat::Bearing;
+    // the cover goes over the one ahead, and the next round on the stroke's side covers it (a Cockpit:
+    // a PC's display at -85.5, the Mac's ahead, the Frame's own screen at +85.5)
+    const std::vector<Bearing> cockpit = {{101, -85.5}, {100, 0.7}, {0, 85.5}};
+    CHECK(grabthat::CoverUnder(cockpit) == 100);
+    CHECK(grabthat::SusanPick(cockpit, 100, 0.7, true, 8) == 0);      // a stroke right: the Frame's screen
+    CHECK(grabthat::SusanPick(cockpit, 100, 0.7, false, 8) == 101);   // left: the PC's
+    const std::vector<Bearing> two = {{100, -3}, {0, 85.5}};          // the PC's gone: either way, the Frame's
+    CHECK(grabthat::SusanPick(two, 100, -3, false, 8) == 0);
+    CHECK(grabthat::CoverUnder({}) == -1);
+    // curved over curved: the Mac's 2.8 m wide on 1.9 m round you, 1.9 m ahead (its +z toward you)
+    Mat mac = Identity();
+    mac.m[1][3] = 1.75f, mac.m[2][3] = -1.9f;
+    const grabthat::Cover c = grabthat::CoverPlace(mac, 2.8, 1.575, 1.9, 1.9, 2160.0 / 3840, 0.15, 1.0);
+    NEAR(c.to.m[2][3], -1.75, 1e-5);   // 15 cm nearer, along its front
+    NEAR(c.to.m[0][3], 0, 1e-6), NEAR(c.to.m[1][3], 1.75, 1e-5);
+    NEAR(c.curve, 1.75, 1e-9);                  // round the same centre
+    NEAR(c.width / c.curve, 2.8 / 1.9, 1e-9);   // the same arc of the view
+    // flat: as big in view from the eyes; a shape taller or wider than the one under it still covers it
+    Mat flat = Identity();
+    flat.m[2][3] = -2.0f;
+    const grabthat::Cover f = grabthat::CoverPlace(flat, 1.6, 0.9, 0, 2.0, 9.0 / 16, 0.2, 1.0);
+    NEAR(f.curve, 0, 1e-12);
+    NEAR(f.width, 1.6 * 1.8 / 2.0, 1e-9);
+    NEAR(grabthat::CoverPlace(flat, 1.6, 0.9, 0, 2.0, 0.75, 0.2, 1.0).width, 1.6 * 0.9, 1e-9);   // 4:3: its width covers
+    const grabthat::Cover wide = grabthat::CoverPlace(flat, 1.6, 0.9, 0, 2.0, 1440.0 / 5120, 0.2, 1.0);
+    NEAR(wide.width * 1440.0 / 5120, 0.9 * 0.9, 1e-9);   // an ultrawide: its height covers
+    NEAR(grabthat::CoverPlace(flat, 1.6, 0.9, 0, 2.0, 9.0 / 16, 0.2, 1.03).width, 1.6 * 0.9 * 1.03, 1e-9);   // the margin
+    // nearer along its own front, whichever way it faces (a screen on your right faces left)
+    Mat right = Identity();
+    right.m[0][0] = 0, right.m[0][2] = -1, right.m[2][0] = 1, right.m[2][2] = 0;
+    right.m[0][3] = 1.9f;
+    const grabthat::Cover r = grabthat::CoverPlace(right, 2.8, 1.575, 1.9, 1.9, 9.0 / 16, 0.15, 1.0);
+    NEAR(r.to.m[0][3], 1.75, 1e-5), NEAR(r.to.m[2][3], 0, 1e-6);
+}
+
 void TestSlotLine() {
     // the eyes at 0 1.6 0; the slot's panel 1 m straight ahead (-z)
     Mat head = Identity(), slot = Identity(), p = Identity();
@@ -5640,6 +5677,7 @@ int main(int argc, char **argv) {
     TestTrackGate();
     TestSweep();
     TestSusanPick();
+    TestCover();
     TestSlotLine();
     TestReadableSize();
     TestViewDistance();
