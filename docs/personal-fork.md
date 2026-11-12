@@ -2,11 +2,13 @@
 
 The `personal` branch is based on `kwin-6.6-output-scale` (`3b039d0`): upstream `experimental` (`fdfd96e`, the `v0.3.0` development line) plus the KWin 6.6 nested output scaling commit. Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); this fork is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
 
-Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, a sturdier way for ft-screens to find its tools, and this fork reference.
+Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, a sturdier way for ft-screens to find its tools, two fixes to the KWin 6.6 scaling (also on its pull request), and this fork reference.
 
 ## KWin 6.6 nested output scaling
 
 The base commit reconciles KWin 6.6's nested output scaling with ft-screens. It advertises fractional scaling, configures the nested output in logical dimensions, and keeps layout positions consistent with the requested scale while KWin applies changes. Floating-window metadata uses the same scale convention. The implementation and SteamOS update checks are documented in `docs/design.md` and `scripts/update-check.py`; offline coverage lives in `screens/tests/screen-scale-test.c` and `layout/tests/test_scales.py`.
+
+From KWin 6.6, `kscreen-doctor` shows every nested output at scale 1, whatever its scale. ft-layout used to read that back and hand it to ft-screens, so a desktop set to 200% went back to 100% a few seconds after it started. `23d2c3f` stops that, and `6a0a06c` makes ft-floatd and `ft-layout remote-view` take screens' scales from the layout as well. [PR #86](https://github.com/Frametop/frametop/pull/86) carries both (`28bdcbd`, `42d0059`). To see the scale an output really has, use `qdbus6 org.kde.KWin /KWin supportInformation`.
 
 ## Per-network stream settings
 
