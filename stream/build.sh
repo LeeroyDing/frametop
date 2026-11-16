@@ -55,5 +55,9 @@ g++ $flags -o build/ft-dectest spike/ft-dectest.cpp $(pkg-config --libs gbm egl 
 g++ $flags -I$mlc/src -I$src/libgamestream -o build/ft-streamtest spike/ft-streamtest.cpp host.cpp build/gamestream/*.o \
   build/mlc/libmoonlight-common-c.a build/mlc/enet/libenet.a \
   $(pkg-config --libs gbm egl glesv2 libcurl openssl expat uuid) -lpthread $vr
-strip --strip-unneeded build/ft-dectest build/ft-streamtest
-echo "built build/ft-dectest build/ft-streamtest"'
+g++ $flags $(pkg-config --cflags openssl) -o build/ft-appless-cap spike/ft-appless-cap.cpp \
+  $(pkg-config --libs openssl) -lz -lpthread
+g++ $flags $(pkg-config --cflags openssl) -o build/ft-appless-vr spike/ft-appless-vr.cpp \
+  $(pkg-config --libs gbm egl glesv2 openssl) -lz -lpthread $vr
+strip --strip-unneeded build/ft-dectest build/ft-streamtest build/ft-appless-cap build/ft-appless-vr
+echo "built build/ft-dectest build/ft-streamtest build/ft-appless-cap build/ft-appless-vr"'
