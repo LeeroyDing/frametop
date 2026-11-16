@@ -157,7 +157,7 @@ void TestBplistAndNegotiatorOffers() {
     CHECK(NegotiationKeys::Generate(&keys));
     const auto m1c = Build0x1cMessage(offers.audio_bplist, offers.video_bplist, keys, false);
     CHECK(m1c[0] == 0x1c);
-    CHECK(ReadBe16(&m1c[2]) + 4 == m1c.size());
+    CHECK(size_t(ReadBe16(&m1c[2])) + 4 == m1c.size());
     CHECK(ReadBe32(&m1c[6]) == 7u);  // strip cursor
 
     const auto ans = BuildMock0x1cAnswer(3840, 2160, 1);
