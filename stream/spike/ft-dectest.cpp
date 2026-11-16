@@ -56,7 +56,8 @@ std::vector<std::pair<size_t, size_t>> AccessUnits(const std::vector<uint8_t> &d
             const int type = d[h] & 0x1f;
             slice = (type >= 1 && type <= 5);
             first = slice && (d[h + 1] & 0x80);  // first_mb_in_slice == 0 (Exp-Golomb '1')
-            opens = (type == 6 || type == 7 || type == 8 || type == 9);
+            // Keep trailing AUD (type 9) attached to the preceding picture so V4L2 flushes immediately.
+            opens = (type == 6 || type == 7 || type == 8);
         } else {
             const int type = d[h] >> 1 & 0x3f;
             slice = type < 32;
