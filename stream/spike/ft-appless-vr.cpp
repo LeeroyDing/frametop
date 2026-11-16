@@ -200,10 +200,11 @@ int main(int argc, char **argv) {
 
         if (now - last_report >= 2'000'000'000LL) {
             const double secs = (now - last_report) / 1e9, cpu = (CpuNs() - cpu0) / 1e9;
-            std::printf("%3.0f s: fed %4.1f fps, decoded %4.1f fps, decode %.1f ms avg %.1f ms worst, "
+            std::printf("%3.0f s: fed %4.1f fps, decoded %4.1f fps, decode %.1f ms avg %.1f ms worst, %llu inside, "
                         "convert %.2f ms avg %.2f ms worst, lost %llu pkts, CPU %.1f%%, stalls %d\n",
                         (now - start) / 1e9, interval_fed / secs, interval_decoded / secs,
                         interval_decoded ? lat_sum / interval_decoded : 0.0, lat_max,
+                        (unsigned long long)(fed - decoded),
                         interval_decoded ? conv.msSum / interval_decoded : 0.0, conv.msMax,
                         (unsigned long long)client.assembler().lost_packets(), 100 * cpu / secs, stalls);
             std::fflush(stdout);

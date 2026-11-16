@@ -83,8 +83,8 @@ std::vector<uint8_t> BuildSyntheticHighProfileSps(uint8_t level_idc, uint32_t ma
     bw.WriteBit(1);    // direct_8x8_inference_flag
     bw.WriteBit(0);    // frame_cropping_flag = 0
     bw.WriteBit(1);    // vui_parameters_present_flag = 1
-    // Add 24 zero bits inside VUI flags to exercise 00 00 03 emulation prevention!
-    bw.WriteBits(0, 24);
+    // Add 8 zero VUI flags (aspect..pic_struct) + bitstream_restriction_flag = 0 to exercise VUI parsing!
+    bw.WriteBits(0, 9);
     bw.WriteBit(1);  // RBSP stop bit
     while ((bw.bytes().size() * 8) == 0) break;
     // Pad trailing bits to byte boundary:
@@ -366,6 +366,7 @@ void TestAvcConfig0x92AndSpsPatch() {
     CHECK(InspectH264Sps(patched, &after));
     CHECK(after.profile_idc == 100 && after.level_idc == 60);
     CHECK(after.max_num_ref_frames == 16);
+    CHECK(after.has_bitstream_restriction && after.max_num_reorder_frames == 0 && after.max_dec_frame_buffering == 16);
     CHECK(after.width == 3840 && after.height == 2160);
 
     // Ensure no illegal 00 00 00 / 00 00 01 / 00 00 02 sequences exist inside patched NAL.
