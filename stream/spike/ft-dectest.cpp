@@ -37,8 +37,8 @@ bool ReadFile(const char *path, std::vector<uint8_t> *out) {
 }
 
 // The access units (one picture each, with any parameter sets and SEI before it) of an
-// Annex B HEVC stream, as [begin, end) byte ranges with their start codes.
-std::vector<std::pair<size_t, size_t>> AccessUnits(const std::vector<uint8_t> &d) {
+// Annex B HEVC or H.264 stream, as [begin, end) byte ranges with their start codes.
+std::vector<std::pair<size_t, size_t>> AccessUnits(const std::vector<uint8_t> &d, bool h264 = false) {
     std::vector<size_t> starts;
     for (size_t i = 0; i + 3 < d.size(); ++i)
         if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1) {
@@ -50,13 +50,21 @@ std::vector<std::pair<size_t, size_t>> AccessUnits(const std::vector<uint8_t> &d
     bool vcl = false;
     for (const size_t s : starts) {
         const size_t h = d[s + 2] == 0 ? s + 4 : s + 3;  // the NAL header
-        if (h + 2 >= d.size()) break;
-        const int type = d[h] >> 1 & 0x3f;
-        const bool slice = type < 32;
-        const bool first = slice && (d[h + 2] & 0x80);  // first_slice_segment_in_pic_flag
-        // VPS, SPS, PPS, AUD, prefix SEI and the reserved prefix types open a new picture.
-        const bool opens = (type >= 32 && type <= 35) || type == 39 || (type >= 41 && type <= 44) ||
-                           (type >= 48 && type <= 55);
+        if (h + (h264 ? 1 : 2) >= d.size()) break;
+        bool slice = false, first = false, opens = false;
+        if (h264) {
+            const int type = d[h] & 0x1f;
+            slice = (type >= 1 && type <= 5);
+            first = slice && (d[h + 1] & 0x80);  // first_mb_in_slice == 0 (Exp-Golomb '1')
+            opens = (type == 6 || type == 7 || type == 8 || type == 9);
+        } else {
+            const int type = d[h] >> 1 & 0x3f;
+            slice = type < 32;
+            first = slice && (d[h + 2] & 0x80);  // first_slice_segment_in_pic_flag
+            // VPS, SPS, PPS, AUD, prefix SEI and the reserved prefix types open a new picture.
+            opens = (type >= 32 && type <= 35) || type == 39 || (type >= 41 && type <= 44) ||
+                    (type >= 48 && type <= 55);
+        }
         if (vcl && (opens || first)) aus.emplace_back(begin, s), begin = s, vcl = false;
         vcl = vcl || slice;
     }
@@ -124,17 +132,21 @@ int main(int argc, char **argv) {
         else if (a == "--once") once = true;
         else if (a == "--headlocked") headlocked = true;
         else if (a == "--alternate") alternate = std::atof(v), ++i;
+        else if (a == "--h264") dec.codec = V4L2_PIX_FMT_H264;
         else if (a == "--convert") convert = true, conv.matrix = std::string(v) == "601" ? EGL_ITU_REC601_EXT : EGL_ITU_REC709_EXT, ++i;
         else if (a == "--range") conv.range = std::string(v) == "pc" ? EGL_YUV_FULL_RANGE_EXT : EGL_YUV_NARROW_RANGE_EXT, ++i;
         else if (a[0] != '-') clip = argv[i];
         else return std::fprintf(stderr, "unknown option %s\n", argv[i]), 2;
     }
-    if (!clip) return std::fprintf(stderr, "usage: ft-dectest CLIP.h265 [--ref PATTERN.rgb] [--format q08c|nv12|ab24|qc24] ...\n"), 2;
+    if (!clip) return std::fprintf(stderr, "usage: ft-dectest CLIP.{h265,h264} [--h264] [--ref PATTERN.rgb] [--format q08c|nv12|ab24|qc24] ...\n"), 2;
+    const std::string clipPath = clip;
+    if (clipPath.size() >= 5 && (clipPath.substr(clipPath.size() - 5) == ".h264" || clipPath.substr(clipPath.size() - 4) == ".264"))
+        dec.codec = V4L2_PIX_FMT_H264;
     dec.keep = keep;
     dec.toSteamVR = !convert;
     std::vector<uint8_t> stream;
     if (!ReadFile(clip, &stream)) return std::perror(clip), 1;
-    const auto aus = AccessUnits(stream);
+    const auto aus = AccessUnits(stream, dec.codec == V4L2_PIX_FMT_H264);
     if (aus.empty()) return std::fprintf(stderr, "%s: no pictures\n", clip), 1;
     std::printf("%s: %zu pictures, %.1f s at %.0f fps\n", clip, aus.size(), aus.size() / fps, fps);
     signal(SIGINT, Stop);

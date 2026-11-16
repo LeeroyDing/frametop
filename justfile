@@ -51,6 +51,7 @@ test-c:
     }
     run screens/tests/screen-scale-test.c scripts/test-screen-scale.sh
     run stream/tests/route_settings_test.cpp scripts/test-route-settings.sh
+    run stream/tests/apple_hp_test.cpp scripts/test-apple-hp.sh
     gcc -std=c11 -Wall -Wextra -Werror -I. screens/tests/controller-click-test.c \
       -lm -o build/tests/controller-click-test
     run screens/tests/controller-click-test.c build/tests/controller-click-test
