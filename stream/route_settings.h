@@ -77,11 +77,13 @@ inline bool RouteSettings(const nlohmann::json &layout, const std::string &host,
     return false;
 }
 
-// Optional keyboard layout ("qwerty", "dvorak", "dvorak-qwerty-cmd", "colemak") and physical
-// key remaps ({"capslock": "leftctrl", ...}) merged from the host entry and display entry.
+// Optional keyboard layout ("qwerty", "dvorak", "dvorak-qwerty-cmd", "colemak"), physical
+// key remaps ({"capslock": "leftctrl", ...}), and view_only input suppression merged from the
+// host entry and display entry.
 struct RawKeyboardSettings {
     std::string kb_layout;
     std::vector<std::pair<std::string, std::string>> keymap;
+    bool view_only = false;
 };
 
 inline RawKeyboardSettings KeyboardSettingsOf(const nlohmann::json &layout, const std::string &host,
@@ -124,6 +126,9 @@ inline RawKeyboardSettings KeyboardSettingsOf(const nlohmann::json &layout, cons
             for (auto it = (*obj)["keymap"].begin(); it != (*obj)["keymap"].end(); ++it) {
                 if (it.value().is_string()) out.keymap.emplace_back(it.key(), it.value().get<std::string>());
             }
+        }
+        if (obj->contains("view_only") && (*obj)["view_only"].is_boolean()) {
+            out.view_only = (*obj)["view_only"].get<bool>();
         }
     };
     merge_from(matched_host);

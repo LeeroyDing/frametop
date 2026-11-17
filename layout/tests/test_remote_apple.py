@@ -137,6 +137,47 @@ class RemoteAppleTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.m.remote_command(["set", "magma-llama-virtual", "keymap=capslock:notakey"])
 
+    def test_set_and_host_configure_view_only(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.remote_command(["add", "Magma Llama", "Magma-Llama.local", "apple:physical"])
+        disp_id = self.hosts()[0]["displays"][0]["id"]
+        self.assertEqual(disp_id, "magma-llama-main")
+        self.m.remote_command(["set", disp_id, "view_only=on"])
+        self.assertIs(self.hosts()[0]["displays"][0]["view_only"], True)
+
+        listed = io.StringIO()
+        with redirect_stdout(listed):
+            self.m.remote_command(["list"])
+        self.assertIn("view-only", listed.getvalue())
+
+        # Turning off when the host has no view_only removes the key cleanly.
+        self.m.remote_command(["set", disp_id, "view_only=off"])
+        self.assertNotIn("view_only", self.hosts()[0]["displays"][0])
+
+        # Host-level view_only=on is inherited, and display-level view_only=off overrides it.
+        self.m.remote_command(["host", "Magma Llama", "view_only=on"])
+        self.assertIs(self.hosts()[0]["view_only"], True)
+        listed = io.StringIO()
+        with redirect_stdout(listed):
+            self.m.remote_command(["list"])
+        self.assertIn("view-only", listed.getvalue())
+
+        self.m.remote_command(["set", disp_id, "view_only=off"])
+        self.assertIs(self.hosts()[0]["displays"][0]["view_only"], False)
+        listed = io.StringIO()
+        with redirect_stdout(listed):
+            self.m.remote_command(["list"])
+        self.assertNotIn("view-only", listed.getvalue())
+
+        # view_only=none clears the override and inherits from the host again.
+        self.m.remote_command(["set", disp_id, "view_only=none"])
+        self.assertNotIn("view_only", self.hosts()[0]["displays"][0])
+        self.m.remote_command(["host", "Magma Llama", "view_only=off"])
+        self.assertNotIn("view_only", self.hosts()[0])
+
+        with self.assertRaises(RuntimeError):
+            self.m.remote_command(["set", disp_id, "view_only=maybe"])
+
 
 if __name__ == "__main__":
     unittest.main()

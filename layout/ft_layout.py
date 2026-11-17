@@ -109,15 +109,17 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
   ft-layout remote set ID size=WxH|fps=F|bitrate=KBPS|label=TEXT|app=APP|metres=M ...
                      [direct.fps=F] [direct.bitrate=KBPS] [network.fps=F] [network.bitrate=KBPS]
                      [kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none] [keymap=FROM:TO[,...]|none]
+                     [view_only=on|off|none]
                                      direct.*: while its stream goes through one of the host's
                                      direct addresses (a dongle, or its Ethernet); network.*: through
                                      its own address; empty: the display's own again (it starts over).
-                                     kb_layout / keymap: ft-appless keyboard translation & remaps (live, within 2 s)
+                                     kb_layout / keymap / view_only: ft-appless input settings (live, within 2 s)
   ft-layout remote host NAME route=auto|network|dongle direct=ADDRESS[,ADDRESS]|none mic=on|off input=on|off
                      [kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none] [keymap=FROM:TO[,...]|none]
+                     [view_only=on|off|none]
                                      how a host's streams reach it (they start over), whether
                                      the Frame's microphone goes to it, whether its keyboard
-                                     and mouse come to Frametop, and default ft-appless keyboard mapping
+                                     and mouse come to Frametop, and default ft-appless input settings
   ft-layout remote connect ID...     start their streams again (and keep them on)
   ft-layout remote disconnect ID...  stop their streams and panels until connected again
   ft-layout remote remove ID         stops it and unpairs its client (the host stays)
@@ -1067,8 +1069,8 @@ def canonical_key_name(raw, allow_none=False):
     raise ValueError(f"unknown key {raw!r}")
 
 
-def apply_keyboard_kv(target, key, value):
-    """Applies kb_layout=... or keymap=... onto a host or display dict; False if unrecognised."""
+def apply_keyboard_kv(target, key, value, *, inherit_view_only=False):
+    """Applies kb_layout=..., keymap=..., or view_only=... onto a host or display dict."""
     if key == "kb_layout":
         norm = value.strip().lower().replace("_", "-")
         if not norm or norm == "none":
@@ -1096,6 +1098,21 @@ def apply_keyboard_kv(target, key, value):
             return False
         target["keymap"] = out
         return True
+    if key == "view_only":
+        norm = value.strip().lower()
+        if not norm or norm == "none":
+            target.pop("view_only", None)
+            return True
+        if norm == "on":
+            target["view_only"] = True
+            return True
+        if norm == "off":
+            if inherit_view_only:
+                target["view_only"] = False
+            else:
+                target.pop("view_only", None)
+            return True
+        return False
     return False
 
 
@@ -1114,6 +1131,15 @@ def effective_keyboard(host, d):
                     else:
                         keymap[src] = dst
     return kb, keymap
+
+
+def effective_view_only(host, d):
+    """Merged view_only flag for a remote display from its host and own entry."""
+    vo = False
+    for obj in (host, d):
+        if isinstance(obj.get("view_only"), bool):
+            vo = obj["view_only"]
+    return vo
 
 
 def plan_remotes(layout, count, displays):
@@ -1391,6 +1417,8 @@ def remote_command(args):
                 state += f" kb {kb}"
             if km:
                 state += " keymap " + ",".join(f"{src}:{dst}" for src, dst in km.items())
+            if effective_view_only(host, d):
+                state += " view-only"
             routes = "".join(f", {r} {stream_settings(*s)}" for r, s in route_settings(d).items())
             print(f"{n} {d['id']} {host.get('name')} {display_target(host, d)} {d['app']} {w}x{h}"
                   f"{stream_settings(d.get('fps', 60), d.get('bitrate', 0))}{routes} "
@@ -1415,11 +1443,11 @@ def remote_command(args):
             elif k == "input" and v in ("on", "off"):
                 host["input"] = v == "on"  # its streams look every 3 s
             elif apply_keyboard_kv(host, k, v):
-                pass  # ft-appless reloads kb_layout and keymap within 2 s
+                pass  # ft-appless reloads kb_layout, keymap, and view_only within 2 s
             else:
                 raise RuntimeError(f"remote host: {kv!r}? (route=auto|network|dongle direct=ADDRESS[,ADDRESS]|none "
                                    "mic=on|off input=on|off kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none "
-                                   "keymap=FROM:TO[,...]|none)")
+                                   "keymap=FROM:TO[,...]|none view_only=on|off|none)")
         save_layout(layout)
         if not restart:
             return
@@ -1599,12 +1627,13 @@ def remote_command(args):
                     not v or (v.isdigit() and ROUTE_LIMITS[key][0] <= int(v) <= ROUTE_LIMITS[key][1])):
                 set_route_setting(d, route, key, int(v) if v else None)
                 rerouted = True
-            elif apply_keyboard_kv(d, k, v):
-                pass  # ft-appless reloads kb_layout and keymap within 2 s
+            elif apply_keyboard_kv(d, k, v, inherit_view_only=bool(host.get("view_only"))):
+                pass  # ft-appless reloads kb_layout, keymap, and view_only within 2 s
             else:
                 raise RuntimeError(f"remote set: {kv!r}? (size=WxH fps=F bitrate=KBPS label=TEXT app=APP metres=M "
                                    "direct.fps=F direct.bitrate=KBPS network.fps=F network.bitrate=KBPS "
-                                   "kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none keymap=FROM:TO[,...]|none, "
+                                   "kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none "
+                                   "keymap=FROM:TO[,...]|none view_only=on|off|none, "
                                    "empty for the display's own; fps 1-240, bitrate 0-500000)")
         save_layout(layout)
         if d.get("off"):
