@@ -590,15 +590,26 @@ void TestFullLoopbackSession() {
             return;
         }
 
-        // 7. Read encrypted SetEncodings + encrypted 0x1c offer.
+        // 7. Read encrypted client messages (0x1d, SetEncodings) until encrypted 0x1c offer arrives.
         auto read_enc = [&](std::vector<uint8_t> *m) -> bool {
             uint8_t lb[2];
             if (!RecvExact(cfd, lb, 2)) return false;
             std::vector<uint8_t> cb(ReadBe16(lb));
             return RecvExact(cfd, cb.data(), cb.size()) && srv_cipher.DecryptRecordBody(cb.data(), cb.size(), m);
         };
-        std::vector<uint8_t> enc_set, enc_1c;
-        if (!read_enc(&enc_set) || !read_enc(&enc_1c) || enc_1c.size() < 0x80) {
+        std::vector<uint8_t> enc_1c;
+        bool saw_1d = false, saw_set = false;
+        for (int i = 0; i < 6; ++i) {
+            std::vector<uint8_t> msg;
+            if (!read_enc(&msg) || msg.empty()) break;
+            if (msg[0] == 0x1d) saw_1d = true;
+            else if (msg[0] == 0x02) saw_set = true;
+            else if (msg[0] == 0x1c) {
+                enc_1c = std::move(msg);
+                break;
+            }
+        }
+        if (!saw_1d || !saw_set || enc_1c.size() < 0x80) {
             close(cfd);
             return;
         }
@@ -707,6 +718,97 @@ void TestFullLoopbackSession() {
     CHECK(patched_info.level_idc == 60 && patched_info.max_num_ref_frames == 16);
 }
 
+void TestZeroDelayPoc2Rewrite() {
+    // Build a VideoToolbox-style CABAC PPS (pps_id=0, sps_id=0, entropy_coding_mode=1,
+    // bottom_field_pic_order=0, slice_groups_m1=0, l0=3, l1=0, weighted_pred=0, wbi=0,
+    // init_qp=0, init_qs=0, chroma_qp=0, deblocking_ctrl=1, constrained_intra=0, redundant=0).
+    BitWriter pbw;
+    pbw.WriteUe(0);
+    pbw.WriteUe(0);
+    pbw.WriteBit(1);  // entropy_coding_mode_flag = 1 (CABAC)
+    pbw.WriteBit(0);  // bottom_field_pic_order_in_frame_present_flag = 0
+    pbw.WriteUe(0);   // num_slice_groups_minus1 = 0
+    pbw.WriteUe(3);   // num_ref_idx_l0_default_active_minus1
+    pbw.WriteUe(0);   // num_ref_idx_l1_default_active_minus1
+    pbw.WriteBit(0);  // weighted_pred_flag = 0
+    pbw.WriteBits(0, 2);
+    pbw.WriteUe(0);   // pic_init_qp_minus26 = 0
+    pbw.WriteUe(0);   // pic_init_qs_minus26 = 0
+    pbw.WriteUe(0);   // chroma_qp_index_offset = 0
+    pbw.WriteBit(1);  // deblocking_filter_control_present_flag = 1
+    pbw.WriteBit(0);
+    pbw.WriteBit(0);
+    pbw.WriteBit(1);  // RBSP stop bit
+    const auto pps_ebsp = AddEmulationPrevention(pbw.bytes());
+    std::vector<uint8_t> pps = {0x28};
+    pps.insert(pps.end(), pps_ebsp.begin(), pps_ebsp.end());
+
+    H264PpsInfo pinfo{};
+    CHECK(InspectH264Pps(pps, &pinfo));
+    CHECK(pinfo.entropy_coding_mode_flag && !pinfo.weighted_pred_flag && pinfo.deblocking_filter_control_present_flag);
+
+    const auto sps = BuildSyntheticHighProfileSps(42, 4);  // log2_max_fn_m4=9, poc_type=0, log2_max_poc_lsb_m4=9
+    H264SpsInfo raw_s{};
+    bool rewrote = false;
+    const auto sps_poc2 = PatchH264SpsPoc2(sps, pinfo, &raw_s, &rewrote);
+    CHECK(rewrote);
+    H264SpsInfo chk{};
+    CHECK(InspectH264Sps(sps_poc2, &chk));
+    CHECK(chk.pic_order_cnt_type == 2 && chk.level_idc == 60 && chk.max_num_ref_frames == 16);
+
+    // Build a synthetic CABAC P-slice (nal_type=1, nri=1) with 13-bit poc_lsb = 0x1555 and a CABAC
+    // payload starting with 0x00 0x00 0x01 0xab 0xcd to exercise cross-boundary 00 00 03 escaping!
+    BitWriter sbw;
+    sbw.WriteUe(0);           // first_mb_in_slice = 0
+    sbw.WriteUe(5);           // slice_type = 5 (P)
+    sbw.WriteUe(0);           // pps_id = 0
+    sbw.WriteBits(7, 13);     // frame_num = 7 (9 + 4 = 13 bits)
+    sbw.WriteBits(0x1555, 13);// pic_order_cnt_lsb (9 + 4 = 13 bits) -> stripped!
+    sbw.WriteBit(0);          // num_ref_idx_active_override_flag = 0
+    sbw.WriteBit(0);          // ref_pic_list_modification_flag_l0 = 0
+    sbw.WriteBit(0);          // adaptive_ref_pic_marking_mode_flag = 0
+    sbw.WriteUe(0);           // cabac_init_idc = 0
+    sbw.WriteUe(2);           // slice_qp_delta = -1 (se code 2)
+    sbw.WriteUe(1);           // disable_deblocking_filter_idc = 1
+    size_t sbw_bits = 1 + 5 + 1 + 13 + 13 + 3 + 1 + 3 + 3;
+    while ((sbw_bits & 7) != 0) {
+        sbw.WriteBit(1);      // cabac_alignment_one_bit
+        ++sbw_bits;
+    }
+    const std::vector<uint8_t> cabac_payload = {0x00, 0x00, 0x01, 0xab, 0xcd, 0x00, 0x00, 0x02, 0xef};
+    for (uint8_t b : cabac_payload) sbw.WriteBits(b, 8);
+
+    const auto slice_ebsp = AddEmulationPrevention(sbw.bytes());
+    std::vector<uint8_t> slice_nal = {0x21};
+    slice_nal.insert(slice_nal.end(), slice_ebsp.begin(), slice_ebsp.end());
+
+    const auto patched_slice = PatchH264SliceHeaderPoc2(slice_nal, raw_s, pinfo);
+    CHECK(patched_slice != slice_nal);
+    const auto patched_rbsp = RemoveEmulationPrevention(patched_slice.data() + 1, patched_slice.size() - 1);
+
+    // Parse patched_rbsp under poc_type == 2 (no pic_order_cnt_lsb!) and verify CABAC payload matches bit-for-bit!
+    BitReader vbr(patched_rbsp.data(), patched_rbsp.size());
+    uint32_t fmb = 99, st = 99, pid = 99, fn = 99, f0 = 1, f1 = 1, f2 = 1, cid = 99, dis = 99;
+    int32_t qpd = 0;
+    CHECK(vbr.ReadUe(&fmb) && fmb == 0);
+    CHECK(vbr.ReadUe(&st) && st == 5);
+    CHECK(vbr.ReadUe(&pid) && pid == 0);
+    CHECK(vbr.ReadBits(13, &fn) && fn == 7);
+    CHECK(vbr.ReadBits(1, &f0) && f0 == 0);
+    CHECK(vbr.ReadBits(1, &f1) && f1 == 0);
+    CHECK(vbr.ReadBits(1, &f2) && f2 == 0);
+    CHECK(vbr.ReadUe(&cid) && cid == 0);
+    CHECK(vbr.ReadSe(&qpd) && qpd == -1);
+    CHECK(vbr.ReadUe(&dis) && dis == 1);
+    while ((vbr.pos() & 7) != 0) {
+        uint32_t one = 0;
+        CHECK(vbr.ReadBits(1, &one) && one == 1);
+    }
+    const size_t pay_off = vbr.pos() >> 3;
+    CHECK(patched_rbsp.size() - pay_off == cabac_payload.size());
+    CHECK(std::memcmp(patched_rbsp.data() + pay_off, cabac_payload.data(), cabac_payload.size()) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -717,6 +819,7 @@ int main() {
     TestSrtpAndSrtcp();
     TestAvcConfig0x92AndSpsPatch();
     TestH264RtpAssembler();
+    TestZeroDelayPoc2Rewrite();
     TestFullLoopbackSession();
     std::printf("apple_hp_test: all %d checks passed\n", g_checks);
     return 0;

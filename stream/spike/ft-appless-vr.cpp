@@ -167,14 +167,16 @@ int main(int argc, char **argv) {
         if (seconds > 0 && now - start > int64_t(seconds * 1e9)) break;
 
         std::vector<ft_apple_hp::H264RtpAssembler::AccessUnit> aus;
-        if (!client.PollStep(5, &aus, &err)) {
+        if (!client.PollStep(5, &aus, &err, dec.fd)) {
             std::fprintf(stderr, "apple-hp stream ended: %s\n", err.c_str());
             break;
         }
         if (!logged_sps && client.assembler().has_config()) {
             const auto &s = client.assembler().raw_sps_info();
-            std::printf("avcC config: profile=%u level=%u->60 max_ref_frames=%u->16 sps_dims=%ux%u\n",
-                        s.profile_idc, s.level_idc, s.max_num_ref_frames, s.width, s.height);
+            std::printf("avcC config: profile=%u level=%u->60 max_ref_frames=%u->16 poc_type=%u->%u sps_dims=%ux%u\n",
+                        s.profile_idc, s.level_idc, s.max_num_ref_frames,
+                        s.pic_order_cnt_type, client.assembler().poc2_rewritten() ? 2u : s.pic_order_cnt_type,
+                        s.width, s.height);
             std::fflush(stdout);
             logged_sps = true;
         }
