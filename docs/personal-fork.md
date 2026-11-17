@@ -31,7 +31,7 @@ A stream that goes through the host's own address with route `auto` keeps checki
 
 ## Slow-hands alert
 
-`hands/ft-camwatch` also watches for XRService's re-sync loop, the fault that leaves hand tracking slow after some system suspends until SteamVR restarts. Its notification has a Restart SteamVR button, and the desktop starts again after the restart. `hands/rendered-hands.md` ("The re-sync loop") has the rules and settings; `hands/tests/test_camwatch.py` tests them.
+`hands/ft-camwatch` also watches for XRService's re-sync loop, the fault that leaves hand tracking slow after some system suspends until SteamVR restarts. Its notification has a Restart SteamVR button, a notice in front of your eyes says the notification is there, and the desktop starts again after the restart. `hands/rendered-hands.md` ("The re-sync loop") has the rules and settings; `hands/tests/test_camwatch.py` tests them.
 
 Upstream ships the watcher's unit as a template that nothing installs. On the Frame, from the live release:
 
@@ -40,7 +40,7 @@ R=~/.local/share/frametop/releases/current
 sed "s|@REPO@|$(readlink -f $R)|g" $R/hands/frametop-camwatch.service > ~/.config/systemd/user/frametop-camwatch.service
 systemctl --user daemon-reload && systemctl --user enable --now frametop-camwatch.service
 journalctl --user -u frametop-camwatch -f      # what it sees and does
-$R/hands/ft-camwatch --notify-test             # the notification, its button doing nothing
+$R/hands/ft-camwatch --notify-test             # the notification and the notice, the button doing nothing
 ```
 
 The unit names a release folder, so write it again after a new release is installed.

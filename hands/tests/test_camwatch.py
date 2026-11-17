@@ -333,7 +333,7 @@ class Alert(unittest.TestCase):
         self.mem = cw.new_memory()
         self.calls = []
         self.note_state = None          # None: showing; True: its button pressed; False: closed
-        self.xr, self.up, self.desktop_running = 111, True, True
+        self.xr, self.up, self.desktop_running, self.paused = 111, True, True, False
         self.alert = cw.SyncAlert(do=self.do())
 
     def do(self):
@@ -346,7 +346,9 @@ class Alert(unittest.TestCase):
                 "restart": lambda: self.calls.append("restart") or True,
                 "desktop": lambda: self.calls.append("desktop") or True,
                 "xr_pid": lambda: self.xr, "up": lambda: self.up,
-                "has_desktop": lambda: self.desktop_running}
+                "has_desktop": lambda: self.desktop_running,
+                "banner": lambda conf: self.calls.append("banner") or True,
+                "paused": lambda: self.paused}
 
     def step(self, t, rate, log="a.log", conf=OFF):
         self.alert.step(1000.0 + t, t, rate, log, self.mem, conf)
@@ -354,9 +356,11 @@ class Alert(unittest.TestCase):
     def test_press_restarts_and_brings_the_desktop_back(self):
         self.step(0, 0)
         self.step(2, 300)
-        self.assertEqual(self.calls, ["post"])
+        self.assertEqual(self.calls, ["post", "banner"])    # the popup, and the notice in front of the eyes
         self.step(4, 300)
-        self.assertEqual(self.calls, ["post"])              # showing: no second one
+        self.assertEqual(self.calls, ["post", "banner"])    # showing: no second one
+        self.calls.clear()
+        self.calls.append("post")
         self.note_state = True
         self.step(6, 300)
         self.assertEqual(self.calls, ["post", "restart"])
@@ -376,11 +380,11 @@ class Alert(unittest.TestCase):
         self.step(0, 300)
         self.note_state = False
         self.step(2, 300)
-        self.assertEqual(self.calls, ["post"])
+        self.assertEqual(self.calls, ["post", "banner"])
         self.step(300, 300)
-        self.assertEqual(self.calls, ["post"])              # not again within 10 min
+        self.assertEqual(self.calls, ["post", "banner"])    # not again within 10 min
         self.step(602, 300)
-        self.assertEqual(self.calls, ["post", "post"])
+        self.assertEqual(self.calls, ["post", "banner"] * 2)
 
     def test_no_desktop_tries_again_later(self):
         self.desktop_running = False
@@ -391,19 +395,28 @@ class Alert(unittest.TestCase):
         self.assertEqual(self.calls, ["post", "post"])
         self.desktop_running = True
         self.step(62, 300)
-        self.assertEqual(self.calls, ["post"] * 3)
+        self.assertEqual(self.calls, ["post"] * 3 + ["banner"])   # the notice only with a popup to point at
         self.step(64, 300)
-        self.assertEqual(self.calls, ["post"] * 3)          # it's showing now
+        self.assertEqual(self.calls, ["post"] * 3 + ["banner"])   # it's showing now
+
+    def test_waits_while_frametop_is_paused(self):
+        self.paused = True                                  # a VR game: nothing into it
+        self.step(0, 300)
+        self.step(31, 300)
+        self.assertEqual(self.calls, [])
+        self.paused = False
+        self.step(62, 300)
+        self.assertEqual(self.calls, ["post", "banner"])
 
     def test_a_stale_notification_cant_restart_the_next_steamvr(self):
         self.step(0, 300)
         self.step(2, 0, log="b.log")                        # SteamVR was restarted some other way
-        self.assertEqual(self.calls, ["post", "drop"])
+        self.assertEqual(self.calls, ["post", "banner", "drop"])
         self.note_state = True                              # a late press goes nowhere
         self.step(4, 0, log="b.log")
-        self.assertEqual(self.calls, ["post", "drop"])
+        self.assertEqual(self.calls, ["post", "banner", "drop"])
         self.step(6, 300, log="b.log")                      # and a loop in the new one notifies at once
-        self.assertEqual(self.calls, ["post", "drop", "post"])
+        self.assertEqual(self.calls, ["post", "banner", "drop", "post", "banner"])
 
     def test_desktop_left_to_autostart_or_to_you(self):
         for conf in (dict(OFF, AUTOSTART="1"), dict(OFF, CAMWATCH_RESTART_DESKTOP="0")):
@@ -411,11 +424,32 @@ class Alert(unittest.TestCase):
             self.step(0, 300, conf=conf)
             self.note_state = True
             self.step(2, 300, conf=conf)
-            self.assertEqual(self.calls, ["post", "restart"])
+            self.assertEqual(self.calls, ["post", "banner", "restart"])
             self.assertIsNone(self.alert.relaunch)
         self.assertIn("starts again by itself", cw.sync_text(dict(OFF, AUTOSTART="1")))
         self.assertIn("starts again by itself", cw.sync_text(OFF))
         self.assertNotIn("starts again by itself", cw.sync_text(dict(OFF, CAMWATCH_RESTART_DESKTOP="0")))
+
+    def test_banner_command_and_pause_state(self):
+        cmd = cw.banner_command("T", ("one", "two"), 8, 100.0)
+        self.assertEqual(cmd[:6], ["systemd-run", "--user", "--collect", "--quiet", "--unit", "frametop-camwatch-notice"])
+        self.assertIn("RuntimeMaxSec=28", cmd)
+        tail = cmd[cmd.index(cw.NOTICE):]
+        self.assertEqual(tail[1:], ["--deadline", "118.000000000", "--seconds", "8", "--notice", "T",
+                                    "--line", "one", "--line", "two"])
+        self.assertTrue(cmd[cmd.index(cw.NOTICE) - 1].endswith("scripts/in-box"))
+        self.assertLessEqual(len(cw.SYNC_BANNER[1]), 4)         # the helper takes 4 lines at most
+        tmp = tempfile.mkdtemp(prefix="camwatch-pause-")
+        try:
+            path = os.path.join(tmp, "pause.json")
+            self.assertFalse(cw.frametop_paused(path))          # no file: not paused
+            for text, paused in (('{"paused": true, "reason": "game"}', True), ('{"paused": false}', False),
+                                 ("not json", False), ("[1]", False)):
+                with open(path, "w") as f:
+                    f.write(text)
+                self.assertEqual(cw.frametop_paused(path), paused, text)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_dry_run_posts_nothing(self):
         self.alert = cw.SyncAlert(dry=True, do=self.do())

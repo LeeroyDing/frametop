@@ -12,6 +12,22 @@ Disconnected and pinned panels are left alone. The legacy gamescope backend
 still reopens the active profile after its countdown. Direct `apply` and `use`
 commands remain immediate; use `ft-layout use NAME` to restore a full profile.
 
+## Notices
+
+The same helper shows a notice instead of the countdown: the same panel in the
+same place, head-following and taking no input, with a title and up to four
+lines, each drawn smaller if it is too wide.
+
+```sh
+layout/countdown/build/ft-reset-timer --notice "Hand tracking is slow" \
+  --line "The headset cameras are out of sync." --seconds 8
+```
+
+It shows for `--seconds` (8; 1 to 60), honours `--deadline` the way the
+countdown does, and `--render-dir DIR` writes `notice.png` offline. Its overlay
+key begins `frametop.guide.notice.`, so the pointer's rays pass through it.
+`hands/ft-camwatch` uses it to say that its desktop notification is waiting.
+
 ## Build and run
 
 ```sh

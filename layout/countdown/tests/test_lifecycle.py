@@ -86,6 +86,47 @@ class LifecycleTests(unittest.TestCase):
             self.assertIn(required, lines)
         self.assertTrue(any(line.startswith("frametop.guide.reset-countdown.") for line in lines))
 
+    def test_notice_shows_once_for_its_seconds_and_cleans_up(self):
+        command = self.command + ["--notice", "Hand tracking is slow", "--line", "The cameras are out of sync.",
+                                  "--line", "Restart SteamVR to fix it.", "--seconds", "1"]
+        start = time.monotonic()
+        result = subprocess.run(command, env=self.env, capture_output=True, timeout=5)
+        elapsed = time.monotonic() - start
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(elapsed, 1)
+        self.assertLess(elapsed, 2)
+        lines = self.lines()
+        self.assertEqual(lines.count("upload"), 1)
+        self.assertEqual(lines.count("show"), 1)
+        self.assertEqual(lines[-3:], ["hide", "destroy", "shutdown"])
+        for required in ("no-input", "non-interactive", "head-relative", "width-0.4"):
+            self.assertIn(required, lines)
+        # frametop.guide*: the pointer's rays pass through it, as through the countdown.
+        self.assertTrue(any(line.startswith("frametop.guide.notice.") for line in lines))
+
+    def test_notice_renders_offline_and_respects_its_deadline(self):
+        out = pathlib.Path(self.temp.name) / "render"
+        notice = ["--notice", "A title far too long to fit the panel at its own size, so it is drawn smaller",
+                  "--line", "One line."]
+        result = subprocess.run(self.command + notice + ["--render-dir", str(out)], env=self.env,
+                                capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines(), [])                       # offline: OpenVR never starts
+        self.assertEqual((out / "notice.png").read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+        result = subprocess.run(self.command + notice + self.deadline(-1), env=self.env,
+                                capture_output=True, timeout=2)
+        self.assertEqual(result.returncode, 3, result.stderr)   # a late start shows nothing
+        self.assertEqual(self.lines(), [])
+
+    def test_notice_options_are_checked(self):
+        for extra in (["--line", "no notice"], ["--seconds", "5"], ["--notice", "t", "--seconds", "0"],
+                      ["--notice", "t", "--seconds", "61"], ["--notice", "t", "--check"],
+                      ["--notice", "t"] + ["--line", "x"] * 5):
+            with self.subTest(extra=extra):
+                result = subprocess.run(self.command + extra, env=self.env, capture_output=True, timeout=3)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(self.lines(), [])
+
     def test_signal_hides_and_destroys(self):
         p = subprocess.Popen(self.command, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:

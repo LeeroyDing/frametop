@@ -9,7 +9,9 @@ done fully" lines a minute, against 2 to 6 for a healthy wake). Each re-sync dro
 frames, so ft-camd gets 1 to 15 fps from cameras that give 30 and hand tracking is slow until
 SteamVR restarts. camcheck.py calls this "ok": all four cameras stay open. For this one the
 notification has a Restart SteamVR button, and it never restarts by itself: the loop only
-shows while the headset is worn.
+shows while the headset is worn. The desktop's popup can be far off to one side of where you
+look, so a notice also shows in front of your eyes for a few seconds (layout/countdown's
+helper) and says the button is there.
 
 Off by default: hands/frametop-camwatch.service is a template the installer doesn't enable.
 Settings in ~/.config/frametop.conf:
@@ -26,6 +28,7 @@ Settings in ~/.config/frametop.conf:
   CAMWATCH_RENOTIFY_MIN=10   the re-sync loop: the least time between two of its notifications
   CAMWATCH_RESTART_DESKTOP=1 after the notification's button restarted SteamVR, start the Frametop desktop
                              again once SteamVR is up (0: start it yourself; AUTOSTART=1 does it anyway)
+  CAMWATCH_BANNER_S=8        the re-sync loop: how long the notice in front of your eyes shows (0: none)
 
 A SteamVR restart also closes the Frametop desktop and every window in it (ft-screens quits
 with SteamVR, and the desktop's unit doesn't restart: see hands/README.md, "Camera check").
@@ -33,7 +36,7 @@ with SteamVR, and the desktop's unit doesn't restart: see hands/README.md, "Came
 It follows the log with a stat every 2 s (no inotify, nothing else while all is well), and
 logs every decision to stdout (the journal). --dry-run never notifies or restarts; --once
 prints the state and what it would do now, and exits; --notify-test posts the re-sync loop's
-notification with a button that does nothing, to see how it shows in the headset.
+notification and notice with a button that does nothing, to see how they show in the headset.
 """
 import argparse
 import collections
@@ -51,6 +54,9 @@ import ft_conf  # noqa: E402
 
 CONF = os.path.expanduser("~/.config/frametop.conf")
 STATE = os.path.expanduser("~/.local/state/frametop/camwatch.json")
+PAUSE = "/run/user/%d/frametop-pause.json" % os.getuid()    # input/game_pause.py's state
+REPO = os.path.dirname(HERE)
+NOTICE = os.path.join(REPO, "layout", "countdown", "build", "ft-reset-timer")
 BACKLIGHTS = "/sys/class/backlight"
 POLL_S = 2.0
 MAX_READ = 16 << 20     # a poll reads at most this much of a log that grew
@@ -66,10 +72,13 @@ SYNC_TEXT = ("SteamVR keeps re-syncing the headset's upper cameras and dropping 
              "That closes this desktop and its windows.")
 SYNC_TEXT_BACK = " The desktop starts again by itself."
 SYNC_ACTION, SYNC_BUTTON = "restart", "Restart SteamVR"
+SYNC_BANNER = ("Hand tracking is slow", ("The headset cameras are out of sync.",
+                                         "Press Restart SteamVR on the desktop", "notification to fix it."))
 NOTIFY_RETRY_S = 30.0   # with no desktop to notify, try again this much later
 DEFAULTS = {"CAMWATCH_AUTO_RESTART": "0", "CAMWATCH_IDLE_S": "60", "CAMWATCH_COOLDOWN_MIN": "30",
             "CAMWATCH_IGNORE_APPIDS": "", "CAMWATCH_NOTIFY": "1", "VNC_PORT": "5900",
-            "CAMWATCH_SYNC_PER_MIN": "100", "CAMWATCH_RENOTIFY_MIN": "10", "CAMWATCH_RESTART_DESKTOP": "1"}
+            "CAMWATCH_SYNC_PER_MIN": "100", "CAMWATCH_RENOTIFY_MIN": "10", "CAMWATCH_RESTART_DESKTOP": "1",
+            "CAMWATCH_BANNER_S": "8"}
 
 
 def log(text):
@@ -225,9 +234,49 @@ def drop_note(note):
         pass
 
 
+def frametop_paused(path=PAUSE):
+    """Frametop is paused, for a VR game or by hand (its panels are hidden)."""
+    try:
+        with open(path) as f:
+            return bool(json.load(f).get("paused"))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def banner_command(title, lines, seconds, now):
+    """layout/countdown's helper as a notice, in the release's container and a unit of its own:
+    podman's client alone is more than this service's memory limit. The deadline keeps a late
+    container start from showing it stale; the unit's own limit ends a stuck one."""
+    cmd = ["systemd-run", "--user", "--collect", "--quiet", "--unit", "frametop-camwatch-notice",
+           "-p", "RuntimeMaxSec=%d" % (seconds + 20), os.path.join(REPO, "scripts", "in-box"), NOTICE,
+           "--deadline", "%.9f" % (now + seconds + 10), "--seconds", str(seconds), "--notice", title]
+    for line in lines:
+        cmd += ["--line", line]
+    return cmd
+
+
+def show_banner(conf):
+    """The re-sync loop's notice in front of the eyes, for CAMWATCH_BANNER_S (1 to 60; 0: none)."""
+    seconds = min(conf_int(conf, "CAMWATCH_BANNER_S"), 60)
+    if seconds <= 0:
+        return False
+    if not os.access(NOTICE, os.X_OK):
+        log("no notice in the headset: %s isn't built" % NOTICE)
+        return False
+    try:
+        r = subprocess.run(banner_command(SYNC_BANNER[0], SYNC_BANNER[1], seconds, time.monotonic()),
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        log("no notice in the headset: %s" % e)
+        return False
+    if r.returncode:
+        log("no notice in the headset: systemd-run exit %d %s" % (r.returncode, (r.stderr or "").strip()))
+    return r.returncode == 0
+
+
 def start_desktop():
     """desktops.sh start, in a unit of its own (this service's CPU and memory limits aren't for it)."""
-    script = os.path.join(os.path.dirname(HERE), "desktops.sh")
+    script = os.path.join(REPO, "desktops.sh")
     r = subprocess.run(["systemd-run", "--user", "--collect", "--quiet", "--unit", "frametop-camwatch-desktop",
                         script, "start"], capture_output=True, text=True, timeout=30)
     log("starting the Frametop desktop again (%s start): exit %d %s" % (script, r.returncode, (r.stderr or "").strip()))
@@ -486,7 +535,8 @@ class SyncAlert:
         self.do = {"post": lambda conf: notify_action(SYNC_TITLE, sync_text(conf), SYNC_ACTION, SYNC_BUTTON),
                    "pressed": note_pressed, "drop": drop_note, "restart": restart_steamvr,
                    "desktop": start_desktop, "xr_pid": camcheck.xrservice_pid, "up": steamvr_up,
-                   "has_desktop": lambda: frametop_bus() is not None}
+                   "has_desktop": lambda: frametop_bus() is not None, "banner": show_banner,
+                   "paused": frametop_paused}
         self.do.update(do or {})
         self.note, self.note_log = None, ""    # the notification showing, and the log it was about
         self.relaunch = None
@@ -540,13 +590,17 @@ class SyncAlert:
             elif self.dry:
                 log("(dry run) would notify: %s" % SYNC_TITLE)
             else:
-                self.note, self.note_log = self.do["post"](conf), log_path
+                # Not into a VR game: Frametop's panels are hidden there, and hands aren't tracked.
+                paused = self.do["paused"]()
+                self.note, self.note_log = (None if paused else self.do["post"](conf)), log_path
                 if self.note is None:
                     mem["sync_notified"] = wall - conf_int(conf, "CAMWATCH_RENOTIFY_MIN") * 60 + NOTIFY_RETRY_S
-                    self.say("no Frametop desktop to notify (trying every %d s while the loop lasts)" % NOTIFY_RETRY_S)
+                    self.say("%s: the notification waits (trying every %d s while the loop lasts)"
+                             % ("Frametop is paused" if paused else "no Frametop desktop to notify", NOTIFY_RETRY_S))
                 else:
                     self.quiet = ""
                     log("notified: %s" % SYNC_TITLE)
+                    self.do["banner"](conf)
 
 
 def notify_test(conf):
@@ -556,6 +610,7 @@ def notify_test(conf):
     if note is None:
         log("no Frametop desktop running: no notification")
         return 1
+    show_banner(conf)
     log("posted; waiting for its button, or for it to be closed")
     while True:
         pressed = note_pressed(note)
