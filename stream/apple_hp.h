@@ -3227,7 +3227,7 @@ private:
             }
             return false;
         };
-        if (try_read_window(1200)) return true;
+        if (try_read_window(opt_.virtual_display ? 2500 : 1500)) return true;
         for (int attempt = 0; attempt < 16; ++attempt) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (!SendEncrypted(msg_1c)) break;
