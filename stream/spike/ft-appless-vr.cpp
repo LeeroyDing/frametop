@@ -121,8 +121,12 @@ int main(int argc, char **argv) {
     }
     OPENSSL_cleanse(opt.password.data(), opt.password.size());
 
-    std::printf("apple-hp live: auth=%s canvas=%ux%u tiles=%u\n",
-                client.auth_used().c_str(), client.canvas().width, client.canvas().height, client.canvas().tiles);
+    std::printf("apple-hp live: auth=%s server_init=%ux%u layout=%ux%u(backing %ux%u) canvas=%ux%u tiles=%u\n",
+                client.auth_used().c_str(), client.server_init_w(), client.server_init_h(),
+                client.layout().scaled_w, client.layout().scaled_h,
+                client.layout().backing_w, client.layout().backing_h,
+                client.canvas().width, client.canvas().height, client.canvas().tiles);
+    std::fflush(stdout);
 
     vr::VROverlayHandle_t ov = vr::k_ulOverlayHandleInvalid;
     if (vr::VROverlay()->CreateOverlay("frametop.appless", "Apple Screen Sharing", &ov) != vr::VROverlayError_None) {
@@ -156,7 +160,7 @@ int main(int argc, char **argv) {
     std::map<uint64_t, int64_t> queued_at;
     vr::SharedTextureHandle_t shown_tex = 0;
     vr::Texture_t tex = {&shown_tex, vr::TextureType_SharedTextureHandle, vr::ColorSpace_Gamma};
-    bool visible = false;
+    bool visible = false, logged_sps = false;
 
     while (!g_stop) {
         const int64_t now = MonoNs();
@@ -166,6 +170,13 @@ int main(int argc, char **argv) {
         if (!client.PollStep(5, &aus, &err)) {
             std::fprintf(stderr, "apple-hp stream ended: %s\n", err.c_str());
             break;
+        }
+        if (!logged_sps && client.assembler().has_config()) {
+            const auto &s = client.assembler().raw_sps_info();
+            std::printf("avcC config: profile=%u level=%u->60 max_ref_frames=%u->16 sps_dims=%ux%u\n",
+                        s.profile_idc, s.level_idc, s.max_num_ref_frames, s.width, s.height);
+            std::fflush(stdout);
+            logged_sps = true;
         }
         for (const auto &au : aus) {
             if (dec.Feed(au.annex_b.data(), au.annex_b.size(), fed)) {
