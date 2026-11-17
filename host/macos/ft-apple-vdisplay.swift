@@ -9,12 +9,13 @@
 //   unconditionally starts `VirtualDisplayHIDFilter` inside `screensharingd`,
 //   dropping all local Mac keyboard, mouse, and Magic Trackpad events.
 //   Mounting the virtual display locally on the Mac via `CGVirtualDisplay` and
-//   connecting Frametop with `apple:physical` streams the same 60 fps hardware
-//   H.264 feed (`CGMainDisplayID()`) while keeping the Mac's attached Magic
+//   mirroring the physical monitor(s) onto it (`CGConfigureDisplayMirrorOfDisplay`)
+//   collapses the Mac into a single mirrored `3456x972` desktop (no second screen)
+//   that `apple:physical` streams at 60 fps while keeping the Mac's attached Magic
 //   Trackpad, keyboard, and mouse 100% native inside macOS.
 //
 // Usage:
-//   swift host/macos/ft-apple-vdisplay.swift [WxH[@HZ]] [--hidpi] [--no-main] [--name NAME]
+//   swift host/macos/ft-apple-vdisplay.swift [WxH[@HZ]] [--mirror|--extend|--no-arrange] [--hidpi] [--name NAME]
 //   # or compile once for instant startup:
 //   swiftc -O host/macos/ft-apple-vdisplay.swift -o ~/.local/bin/ft-apple-vdisplay
 
@@ -22,24 +23,34 @@ import CoreGraphics
 import Foundation
 import ObjectiveC.runtime
 
+enum ArrangeMode: String {
+    case mirror = "mirror"
+    case extend = "extend"
+    case none = "none"
+}
+
 struct Config {
     var width: UInt32 = 3456
     var height: UInt32 = 972
     var refreshHz: Double = 60.0
     var hiDPI: Bool = false
-    var makeMain: Bool = true
+    var arrange: ArrangeMode = .mirror
     var dryRun: Bool = false
+    var selfTest: Bool = false
     var name: String = "Frametop Virtual Display"
     var serial: UInt32 = 1
 }
 
 func printUsage() {
     print("""
-    usage: ft-apple-vdisplay [WxH[@HZ]] [--hidpi] [--no-main] [--name TEXT] [--serial N] [--dry-run]
+    usage: ft-apple-vdisplay [WxH[@HZ]] [--mirror|--extend|--no-arrange] [--hidpi] [--name TEXT] [--serial N] [--dry-run]
 
     Mounts a local CoreGraphics virtual display (default: 3456x972@60 1x) until interrupted (Ctrl+C).
-    By default, promotes the virtual display to Main Display for the current session so macOS Screen
-    Sharing (`apple:physical`) captures it while keeping local Magic Trackpad & keyboard gestures live.
+    Modes:
+      --mirror      (default) Mirror physical display(s) onto the virtual display ("Optimize for
+                    Frametop Virtual Display") so there is only ONE 3456x972 desktop and no extra screen.
+      --extend      Keep displays separate and promote the virtual display to Main Display at (0, 0).
+      --no-arrange  Mount the virtual display without changing macOS display arrangement.
     """)
 }
 
@@ -70,12 +81,18 @@ func parseArgs() -> Config {
         case "-h", "--help":
             printUsage()
             exit(0)
+        case "--mirror":
+            cfg.arrange = .mirror
+        case "--extend", "--main":
+            cfg.arrange = .extend
+        case "--no-arrange", "--no-main":
+            cfg.arrange = .none
         case "--hidpi":
             cfg.hiDPI = true
-        case "--no-main":
-            cfg.makeMain = false
         case "--dry-run":
             cfg.dryRun = true
+        case "--self-test":
+            cfg.selfTest = true
         case "--name":
             guard i + 1 < args.count else {
                 fputs("ft-apple-vdisplay: --name requires a value\n", stderr)
@@ -155,6 +172,43 @@ func createVirtualDisplay(descriptor: AnyObject, settings: AnyObject) -> (displa
     return did != 0 ? (disp, did) : nil
 }
 
+func mirrorOntoVirtualDisplay(virtualID: CGDirectDisplayID) -> [(CGDirectDisplayID, CGDirectDisplayID)] {
+    var active = [CGDirectDisplayID](repeating: 0, count: 16)
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(UInt32(active.count), &active, &count) == .success, count > 1 else {
+        return []
+    }
+    let others = (0..<Int(count)).map { active[$0] }.filter { $0 != virtualID && $0 != 0 }
+    if others.isEmpty { return [] }
+
+    let saved = others.map { ($0, CGDisplayMirrorsDisplay($0)) }
+    var configRef: CGDisplayConfigRef?
+    guard CGBeginDisplayConfiguration(&configRef) == .success, let cfg = configRef else { return [] }
+    for (d, _) in saved {
+        CGConfigureDisplayMirrorOfDisplay(cfg, d, virtualID)
+    }
+    let err = CGCompleteDisplayConfiguration(cfg, .forSession)
+    if err != .success {
+        CGCancelDisplayConfiguration(cfg)
+        fputs("ft-apple-vdisplay: warning: mirror configuration returned \(err.rawValue)\n", stderr)
+        return []
+    }
+    return saved
+}
+
+func unmirrorDisplays(_ saved: [(CGDirectDisplayID, CGDirectDisplayID)]) {
+    if saved.isEmpty { return }
+    var configRef: CGDisplayConfigRef?
+    guard CGBeginDisplayConfiguration(&configRef) == .success, let cfg = configRef else { return }
+    for (d, prevMaster) in saved {
+        CGConfigureDisplayMirrorOfDisplay(cfg, d, prevMaster)
+    }
+    let err = CGCompleteDisplayConfiguration(cfg, .forSession)
+    if err != .success {
+        CGCancelDisplayConfiguration(cfg)
+    }
+}
+
 func promoteToMainDisplay(virtualID: CGDirectDisplayID, logicalWidth: UInt32, logicalHeight: UInt32) {
     let oldMain = CGMainDisplayID()
     if oldMain == virtualID || oldMain == 0 { return }
@@ -220,9 +274,12 @@ settings.setValue(cfg.hiDPI ? 1 : 0, forKey: "hiDPI")
 settings.setValue(modes, forKey: "modes")
 
 if cfg.dryRun {
-    print("dry-run ok: \(cfg.name) logical=\(cfg.width)x\(cfg.height)@\(Int(cfg.refreshHz)) max=\(maxW)x\(maxH) hidpi=\(cfg.hiDPI ? "on" : "off") main=\(cfg.makeMain ? "on" : "off")")
+    print("dry-run ok: \(cfg.name) logical=\(cfg.width)x\(cfg.height)@\(Int(cfg.refreshHz)) max=\(maxW)x\(maxH) hidpi=\(cfg.hiDPI ? "on" : "off") arrange=\(cfg.arrange.rawValue)")
     exit(0)
 }
+
+let origMain = CGMainDisplayID()
+let origBounds = CGDisplayBounds(origMain)
 
 var activeDisplay: AnyObject?
 var displayID: CGDirectDisplayID = 0
@@ -235,25 +292,52 @@ autoreleasepool {
     displayID = mounted.id
 }
 
-if cfg.makeMain {
-    // Allow WindowServer a brief beat to register the new CGDirectDisplayID before promoting it.
+var mirroredPhysical: [(CGDirectDisplayID, CGDirectDisplayID)] = []
+switch cfg.arrange {
+case .mirror:
+    usleep(200_000)
+    mirroredPhysical = mirrorOntoVirtualDisplay(virtualID: displayID)
+case .extend:
     usleep(200_000)
     promoteToMainDisplay(virtualID: displayID, logicalWidth: cfg.width, logicalHeight: cfg.height)
+case .none:
+    break
 }
 
 setbuf(stdout, nil)
-print("Mounted '\(cfg.name)' (displayID=\(displayID), \(cfg.width)x\(cfg.height)@\(Int(cfg.refreshHz))\(cfg.hiDPI ? " HiDPI" : ""), main=\(CGMainDisplayID() == displayID ? "yes" : "no")).")
-print("Press Ctrl+C to unmount and restore your previous display arrangement.")
+let curMain = CGMainDisplayID()
+let curBounds = CGDisplayBounds(curMain)
+var activeList = [CGDirectDisplayID](repeating: 0, count: 16)
+var activeCount: UInt32 = 0
+_ = CGGetActiveDisplayList(UInt32(activeList.count), &activeList, &activeCount)
+
+print("Mounted '\(cfg.name)' (displayID=\(displayID), arrange=\(cfg.arrange.rawValue), activeDisplays=\(activeCount), mainID=\(curMain), mainBounds=\(Int(curBounds.width))x\(Int(curBounds.height))@\(Int(cfg.refreshHz))\(cfg.hiDPI ? " HiDPI" : "")).")
+
+if cfg.selfTest {
+    usleep(300_000)
+    unmirrorDisplays(mirroredPhysical)
+    autoreleasepool {
+        activeDisplay = nil
+    }
+    usleep(300_000)
+    let afterMain = CGMainDisplayID()
+    let afterBounds = CGDisplayBounds(afterMain)
+    print("Self-test restored: mainID=\(afterMain) (was \(origMain)), bounds=\(Int(afterBounds.width))x\(Int(afterBounds.height)) (was \(Int(origBounds.width))x\(Int(origBounds.height))).")
+    exit(0)
+}
+
+print("Press Ctrl+C to unmount and restore your normal display resolution.")
 
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
 let sigInt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
 let sigTerm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 let shutdown: () -> Void = {
+    unmirrorDisplays(mirroredPhysical)
     autoreleasepool {
         activeDisplay = nil
     }
-    print("\nUnmounted '\(cfg.name)' (displayID=\(displayID)).")
+    print("\nUnmounted '\(cfg.name)' (displayID=\(displayID)) and restored physical display.")
     CFRunLoopStop(CFRunLoopGetMain())
 }
 sigInt.setEventHandler(handler: shutdown)
