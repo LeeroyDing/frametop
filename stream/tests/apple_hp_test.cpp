@@ -692,10 +692,34 @@ void TestFullLoopbackSession() {
         send_srtp(2, 12000, false, fu1);
         send_srtp(3, 12000, true, fu2);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        // 10. Read encrypted runtime input records (Right click, Middle click, scroll while held,
+        //     Left Ctrl -> 0x10 Globe down, and Blur -> 0x10 Globe up + pointer release).
+        bool saw_right = false, saw_right_mid = false, saw_pure_scroll = false;
+        bool saw_globe_down = false, saw_globe_up = false, saw_btn_clear = false;
+        for (int i = 0; i < 8; ++i) {
+            std::vector<uint8_t> imsg;
+            if (!read_enc(&imsg) || imsg.empty()) break;
+            if (imsg[0] == 0x05 && imsg.size() == 6) {
+                if (imsg[1] == 0x02) saw_right = true;
+                else if (imsg[1] == 0x06) saw_right_mid = true;
+                else if (imsg[1] == 0x08) saw_pure_scroll = true;
+                else if (imsg[1] == 0x00 && saw_right_mid) saw_btn_clear = true;
+            } else if (imsg[0] == 0x10) {
+                bool g_down = false;
+                uint16_t g_vk = 0, g_kbt = 0;
+                if (ParseAppleKeycodeEvent0x10(srv_cipher.cbc_key().data(), imsg.data(), imsg.size(),
+                                               &g_down, &g_vk, &g_kbt) &&
+                    g_vk == kMacVkFunction && g_kbt == kAppleKeyboardTypeAnsi) {
+                    if (g_down) saw_globe_down = true;
+                    else if (saw_globe_down) saw_globe_up = true;
+                }
+            }
+            if (saw_globe_up && saw_btn_clear) break;
+        }
+
         close(ufd);
         close(cfd);
-        srv_ok = true;
+        srv_ok = saw_right && saw_right_mid && saw_pure_scroll && saw_globe_down && saw_globe_up && saw_btn_clear;
     });
 
     SessionOptions opt;
@@ -710,6 +734,7 @@ void TestFullLoopbackSession() {
     opt.warmup_tcp = false;
     opt.settle_ms = 5;
     opt.toggle_settle_ms = 5;
+    ApplyKeyboardSettings("dvorak", {{"capslock", "leftctrl"}, {"leftctrl", "globe"}}, &opt.keyboard);
 
     SessionClient client;
     std::string err;
@@ -720,6 +745,12 @@ void TestFullLoopbackSession() {
     for (int i = 0; i < 20 && aus.empty(); ++i) {
         client.PollStep(20, &aus);
     }
+    CHECK(client.SendMouseButton(0x111, true));   // BTN_RIGHT -> 0x02
+    CHECK(client.SendMouseButton(0x112, true));   // BTN_MIDDLE -> 0x02 | 0x04 = 0x06
+    CHECK(client.SendMouseScroll(0.0, -2.0));     // 2 pure 0x08 scroll-up ticks even while buttons held
+    CHECK(client.SendEvdevKey(29, true));         // Physical Left Ctrl -> 0x10 Globe (kVK_Function = 0x3f) down
+    CHECK(client.SendInputBlur());                // Releases 0x10 Globe up + clears mouse buttons to 0x00
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
     client.Close();
     server_thread.join();
     close(srv_listen);
@@ -856,7 +887,25 @@ void TestInputKeyMappingAndMetaHoldback() {
     CHECK(ScalePointerCoord(9999.0, 3840, 3840) == 3839);
     CHECK(ScalePointerCoord(3839.0, 3840, 5120) == 5119);
     CHECK(ScalePointerCoord(40000.0, 40000, 40000) == 32767);
-    CHECK(MouseButtonBit(0x110) == 0x01 && MouseButtonBit(0x112) == 0x02 && MouseButtonBit(0x111) == 0x04);
+    // Apple viewer CGMouseButton bit order: 0x110 (Left) -> 0x01, 0x111 (Right) -> 0x02, 0x112 (Middle) -> 0x04.
+    CHECK(MouseButtonBit(0x110) == 0x01 && MouseButtonBit(0x111) == 0x02 && MouseButtonBit(0x112) == 0x04);
+
+    // Verify Apple 0x10 EncryptedEventMessage roundtrip for kVK_Function (0x3f = Globe / Fn).
+    uint8_t ecb_key[16]{};
+    CHECK(RandomBytes(ecb_key, sizeof ecb_key));
+    std::vector<uint8_t> pkt10;
+    CHECK(BuildAppleKeycodeEvent0x10(ecb_key, true, kMacVkFunction, &pkt10));
+    CHECK(pkt10.size() == 18 && pkt10[0] == 0x10 && pkt10[1] == 0x03);
+    bool p_down = false;
+    uint16_t p_vk = 0, p_kbt = 0;
+    uint32_t p_ks = 99;
+    CHECK(ParseAppleKeycodeEvent0x10(ecb_key, pkt10.data(), pkt10.size(), &p_down, &p_vk, &p_kbt, &p_ks));
+    CHECK(p_down && p_vk == 0x003f && p_kbt == 0x003d && p_ks == 0);
+    CHECK(BuildAppleKeycodeEvent0x10(ecb_key, false, kMacVkFunction, &pkt10));
+    CHECK(ParseAppleKeycodeEvent0x10(ecb_key, pkt10.data(), pkt10.size(), &p_down, &p_vk, &p_kbt, &p_ks));
+    CHECK(!p_down && p_vk == 0x003f && p_kbt == 0x003d);
+    pkt10[0] = 0x04;
+    CHECK(!ParseAppleKeycodeEvent0x10(ecb_key, pkt10.data(), pkt10.size(), &p_down, &p_vk));
 
     // Verify Command vs Option keysym mapping matches ScreensharingAgent KeyMap.c:
     // KEY_LEFTMETA (125) -> 0xffeb (Super_L -> Command), KEY_LEFTALT (56) -> 0xffe7 (Meta_L -> Option).
@@ -921,6 +970,9 @@ void TestInputKeyMappingAndMetaHoldback() {
     CHECK(!ParseEvdevKeyName("code:194", &kc));  // F24 reserved internal cancel signal
     CHECK(!ParseEvdevKeyName("none", &kc, false));
     CHECK(ParseEvdevKeyName("none", &kc, true) && kc == 0);
+    CHECK(ParseEvdevKeyName("globe", &kc) && kc == EvdevKeyMapper::kEvKeyFn);
+    CHECK(ParseEvdevKeyName("fn", &kc) && kc == EvdevKeyMapper::kEvKeyFn);
+    CHECK(ParseEvdevKeyName("function", &kc) && kc == EvdevKeyMapper::kEvKeyFn);
 
     // 6. Full ANSI Dvorak 47-key layout verification: all 26 letters form a bijection onto a..z,
     //    shifted + Caps Lock obey letter-vs-punctuation rules, and moved punctuation is exact.
@@ -1022,6 +1074,32 @@ void TestInputKeyMappingAndMetaHoldback() {
     hot.Process(31, true, rec);   // Physical 'S' -> lowercase Dvorak 'o'
     hot.Process(31, false, rec);
     CHECK(evs.size() == 2 && evs[0] == std::make_pair(true, uint32_t('o')));
+
+    // 10. Non-transitive simultaneous remap: Caps Lock -> Left Control AND Left Ctrl -> Globe!
+    //     Physical Caps Lock (58) emits Control_L (0xffe3), while physical Left Ctrl (29) emits
+    //     macOS Globe (kAppleKeysymGlobe -> kVK_Function = 0x3f) without chaining 58 -> 29 -> 464.
+    KeyboardMappingConfig globe_cfg;
+    ApplyKeyboardSettings("dvorak", {{"capslock", "leftctrl"}, {"leftctrl", "globe"}}, &globe_cfg);
+    CHECK(globe_cfg.keymap.at(58) == 29 && globe_cfg.keymap.at(29) == EvdevKeyMapper::kEvKeyFn);
+
+    EvdevKeyMapper gkm(globe_cfg);
+    evs.clear();
+    gkm.Process(58, true, rec);   // Physical Caps Lock -> Control_L (0xffe3) down
+    gkm.Process(58, false, rec);  // Physical Caps Lock -> Control_L up
+    gkm.Process(29, true, rec);   // Physical Left Ctrl -> Globe (kAppleKeysymGlobe) down
+    gkm.Process(32, true, rec);   // Physical 'D' -> Dvorak 'e' (Globe+E emoji shortcut!)
+    gkm.Process(32, false, rec);
+    gkm.Process(29, false, rec);  // Physical Left Ctrl -> Globe up
+    CHECK(evs.size() == 6);
+    CHECK(evs[0] == std::make_pair(true, uint32_t(0xffe3)));
+    CHECK(evs[1] == std::make_pair(false, uint32_t(0xffe3)));
+    CHECK(evs[2] == std::make_pair(true, kAppleKeysymGlobe));
+    CHECK(evs[3] == std::make_pair(true, uint32_t('e')));
+    CHECK(evs[4] == std::make_pair(false, uint32_t('e')));
+    CHECK(evs[5] == std::make_pair(false, kAppleKeysymGlobe));
+    uint16_t vk_out = 0;
+    CHECK(IsAppleMacKeycodeKeysym(evs[2].second, &vk_out) && vk_out == kMacVkFunction);
+    CHECK(!IsAppleMacKeycodeKeysym(0xffe3, &vk_out));
 }
 
 void TestRfc3640AudioAndCredsStore() {

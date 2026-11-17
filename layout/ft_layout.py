@@ -255,6 +255,7 @@ KEY_ALIASES = {
     "rightmeta": "rightmeta", "rmeta": "rightmeta", "rightsuper": "rightmeta", "rsuper": "rightmeta",
     "rcmd": "rightmeta", "rcommand": "rightmeta", "rightcmd": "rightmeta", "rightcommand": "rightmeta",
     "rwin": "rightmeta",
+    "globe": "globe", "fn": "globe", "function": "globe",
 }
 STREAM = os.path.join(REPO, "stream", "build", "ft-stream")
 APPLESS = os.path.join(REPO, "stream", "build", "ft-appless")

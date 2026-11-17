@@ -107,18 +107,21 @@ class RemoteAppleTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             self.m.remote_command(["add", "Magma Llama", "Magma-Llama.local", "apple:virtual@1"])
         self.m.remote_command(["host", "Magma Llama", "kb_layout=qwerty", "keymap=leftalt:cmd"])
-        self.m.remote_command(["set", "magma-llama-virtual", "kb_layout=dvorak", "keymap=caps:ctrl"])
+        self.m.remote_command(["set", "magma-llama-virtual", "kb_layout=dvorak", "keymap=caps:ctrl,lctrl:globe"])
         host = self.hosts()[0]
         disp = host["displays"][0]
         self.assertEqual(host["kb_layout"], "qwerty")
         self.assertEqual(host["keymap"], {"leftalt": "leftmeta"})
         self.assertEqual(disp["kb_layout"], "dvorak")
-        self.assertEqual(disp["keymap"], {"capslock": "leftctrl"})
+        self.assertEqual(disp["keymap"], {"capslock": "leftctrl", "leftctrl": "globe"})
 
         listed = io.StringIO()
         with redirect_stdout(listed):
             self.m.remote_command(["list"])
-        self.assertIn("kb dvorak keymap leftalt:leftmeta,capslock:leftctrl", listed.getvalue())
+        self.assertIn("kb dvorak keymap leftalt:leftmeta,capslock:leftctrl,leftctrl:globe", listed.getvalue())
+
+        self.m.remote_command(["set", "magma-llama-virtual", "keymap=leftctrl:fn"])
+        self.assertEqual(self.hosts()[0]["displays"][0]["keymap"], {"leftctrl": "globe"})
 
         self.m.remote_command(["set", "magma-llama-virtual", "kb_layout=none", "keymap="])
         self.m.remote_command(["host", "Magma Llama", "kb_layout=", "keymap=none"])
