@@ -108,13 +108,16 @@ Usage (on the Frame host; Frametop Display Settings calls it too):
                                      as two lines: a Sunshine instance on PORT) -> its id
   ft-layout remote set ID size=WxH|fps=F|bitrate=KBPS|label=TEXT|app=APP|metres=M ...
                      [direct.fps=F] [direct.bitrate=KBPS] [network.fps=F] [network.bitrate=KBPS]
+                     [kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none] [keymap=FROM:TO[,...]|none]
                                      direct.*: while its stream goes through one of the host's
                                      direct addresses (a dongle, or its Ethernet); network.*: through
-                                     its own address; empty: the display's own again (it starts over)
+                                     its own address; empty: the display's own again (it starts over).
+                                     kb_layout / keymap: ft-appless keyboard translation & remaps (live, within 2 s)
   ft-layout remote host NAME route=auto|network|dongle direct=ADDRESS[,ADDRESS]|none mic=on|off input=on|off
+                     [kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none] [keymap=FROM:TO[,...]|none]
                                      how a host's streams reach it (they start over), whether
-                                     the Frame's microphone goes to it, and whether its keyboard
-                                     and mouse come to Frametop (both within 3 s, no restart)
+                                     the Frame's microphone goes to it, whether its keyboard
+                                     and mouse come to Frametop, and default ft-appless keyboard mapping
   ft-layout remote connect ID...     start their streams again (and keep them on)
   ft-layout remote disconnect ID...  stop their streams and panels until connected again
   ft-layout remote remove ID         stops it and unpairs its client (the host stays)
@@ -199,6 +202,60 @@ APPLE_PORT = 5900  # macOS High Performance Screen Sharing (screensharingd, TCP/
 # "direct" through one of the host's direct addresses, "network" through its own address.
 ROUTE_LIMITS = {"fps": (1, 240), "bitrate": (0, 500000)}
 ROUTE_NAMES = ("direct", "network")
+KB_LAYOUT_ALIASES = {
+    "qwerty": "qwerty", "us": "qwerty", "default": "qwerty",
+    "dvorak": "dvorak",
+    "dvorak-qwerty-cmd": "dvorak-qwerty-cmd", "dvorak-cmd": "dvorak-qwerty-cmd",
+    "colemak": "colemak",
+}
+KEY_ALIASES = {
+    "esc": "esc", "escape": "esc",
+    "minus": "minus", "hyphen": "minus",
+    "equal": "equal", "equals": "equal",
+    "backspace": "backspace", "bksp": "backspace",
+    "tab": "tab",
+    "leftbrace": "leftbrace", "lbrace": "leftbrace", "leftbracket": "leftbrace", "lbracket": "leftbrace",
+    "rightbrace": "rightbrace", "rbrace": "rightbrace", "rightbracket": "rightbrace", "rbracket": "rightbrace",
+    "enter": "enter", "return": "enter",
+    "leftctrl": "leftctrl", "lctrl": "leftctrl", "ctrl": "leftctrl", "control": "leftctrl", "leftcontrol": "leftctrl",
+    "semicolon": "semicolon",
+    "apostrophe": "apostrophe", "quote": "apostrophe",
+    "grave": "grave", "backtick": "grave", "tilde": "grave",
+    "leftshift": "leftshift", "lshift": "leftshift", "shift": "leftshift",
+    "backslash": "backslash",
+    "comma": "comma",
+    "dot": "dot", "period": "dot",
+    "slash": "slash",
+    "rightshift": "rightshift", "rshift": "rightshift",
+    "kpasterisk": "kpasterisk", "kpmultiply": "kpasterisk",
+    "leftalt": "leftalt", "lalt": "leftalt", "alt": "leftalt", "opt": "leftalt", "option": "leftalt",
+    "leftopt": "leftalt", "leftoption": "leftalt",
+    "space": "space", "spacebar": "space",
+    "capslock": "capslock", "caps": "capslock",
+    "numlock": "numlock",
+    "kp0": "kp0", "kp1": "kp1", "kp2": "kp2", "kp3": "kp3", "kp4": "kp4",
+    "kp5": "kp5", "kp6": "kp6", "kp7": "kp7", "kp8": "kp8", "kp9": "kp9",
+    "kpminus": "kpminus", "kpsubtract": "kpminus",
+    "kpplus": "kpplus", "kpadd": "kpplus",
+    "kpdot": "kpdot", "kpdecimal": "kpdot",
+    "102nd": "102nd", "iso102nd": "102nd",
+    "kpenter": "kpenter",
+    "rightctrl": "rightctrl", "rctrl": "rightctrl", "rightcontrol": "rightctrl",
+    "kpslash": "kpslash", "kpdivide": "kpslash",
+    "rightalt": "rightalt", "ralt": "rightalt", "altgr": "rightalt", "ropt": "rightalt", "roption": "rightalt",
+    "rightopt": "rightalt", "rightoption": "rightalt",
+    "home": "home", "up": "up", "pageup": "pageup", "pgup": "pageup",
+    "left": "left", "right": "right", "end": "end", "down": "down", "pagedown": "pagedown", "pgdn": "pagedown",
+    "insert": "insert", "ins": "insert",
+    "delete": "delete", "del": "delete", "forwarddelete": "delete",
+    "kpequal": "kpequal",
+    "leftmeta": "leftmeta", "lmeta": "leftmeta", "meta": "leftmeta", "super": "leftmeta",
+    "leftsuper": "leftmeta", "lsuper": "leftmeta", "cmd": "leftmeta", "command": "leftmeta",
+    "leftcmd": "leftmeta", "leftcommand": "leftmeta", "lcmd": "leftmeta", "win": "leftmeta", "lwin": "leftmeta",
+    "rightmeta": "rightmeta", "rmeta": "rightmeta", "rightsuper": "rightmeta", "rsuper": "rightmeta",
+    "rcmd": "rightmeta", "rcommand": "rightmeta", "rightcmd": "rightmeta", "rightcommand": "rightmeta",
+    "rwin": "rightmeta",
+}
 STREAM = os.path.join(REPO, "stream", "build", "ft-stream")
 APPLESS = os.path.join(REPO, "stream", "build", "ft-appless")
 RESET_TIMER = os.path.join(REPO, "layout", "countdown", "build", "ft-reset-timer")
@@ -986,6 +1043,78 @@ def stream_settings(fps, bitrate):
     return f"@{fps} {bitrate} kbit/s" if bitrate else f"@{fps} default bitrate"
 
 
+def canonical_key_name(raw, allow_none=False):
+    """Canonical physical key name for ft-appless keymap entries (stream/apple_hp.h)."""
+    low = raw.strip().lower()
+    if not low:
+        raise ValueError("empty key name")
+    for prefix in ("code:", "evdev:"):
+        if low.startswith(prefix):
+            tail = low[len(prefix):]
+            if tail.isdigit() and 1 <= int(tail) <= 255 and int(tail) != 194:
+                return f"code:{int(tail)}"
+            raise ValueError(f"bad key code {raw!r}")
+    s = re.sub(r"[-_]", "", low) if len(low) > 1 else low
+    if allow_none and s in ("none", "disabled", "off"):
+        return "none"
+    if len(s) == 1 and ("a" <= s <= "z" or "0" <= s <= "9"):
+        return s
+    if len(s) in (2, 3) and s[0] == "f" and s[1:].isdigit() and 1 <= int(s[1:]) <= 20:
+        return f"f{int(s[1:])}"
+    if s in KEY_ALIASES:
+        return KEY_ALIASES[s]
+    raise ValueError(f"unknown key {raw!r}")
+
+
+def apply_keyboard_kv(target, key, value):
+    """Applies kb_layout=... or keymap=... onto a host or display dict; False if unrecognised."""
+    if key == "kb_layout":
+        norm = value.strip().lower().replace("_", "-")
+        if not norm or norm == "none":
+            target.pop("kb_layout", None)
+            return True
+        if norm in KB_LAYOUT_ALIASES:
+            target["kb_layout"] = KB_LAYOUT_ALIASES[norm]
+            return True
+        return False
+    if key == "keymap":
+        norm = value.strip()
+        if not norm or norm.lower() == "none":
+            target.pop("keymap", None)
+            return True
+        out = {}
+        try:
+            for item in norm.split(","):
+                src, sep, dst = item.partition(":")
+                if not sep:
+                    return False
+                out[canonical_key_name(src, False)] = canonical_key_name(dst, True)
+        except ValueError:
+            return False
+        if not out:
+            return False
+        target["keymap"] = out
+        return True
+    return False
+
+
+def effective_keyboard(host, d):
+    """Merged (kb_layout, keymap) for a remote display from its host and own entry."""
+    kb = ""
+    keymap = {}
+    for obj in (host, d):
+        if isinstance(obj.get("kb_layout"), str) and obj["kb_layout"]:
+            kb = obj["kb_layout"]
+        if isinstance(obj.get("keymap"), dict):
+            for src, dst in obj["keymap"].items():
+                if isinstance(src, str) and isinstance(dst, str):
+                    if src == dst:
+                        keymap.pop(src, None)
+                    else:
+                        keymap[src] = dst
+    return kb, keymap
+
+
 def plan_remotes(layout, count, displays):
     """The remote displays' poses in the head frame (as plan()): their own place, or else a
     row above the screens, hinged like the arc preset."""
@@ -1256,6 +1385,11 @@ def remote_command(args):
             state = "disconnected" if d.get("off") else running.get(n, "off")
             state += f" route {host.get('route', 'auto')}{' mic' if host.get('mic') else ''}"
             state += " input" if host.get("input") else ""
+            kb, km = effective_keyboard(host, d)
+            if kb:
+                state += f" kb {kb}"
+            if km:
+                state += " keymap " + ",".join(f"{src}:{dst}" for src, dst in km.items())
             routes = "".join(f", {r} {stream_settings(*s)}" for r, s in route_settings(d).items())
             print(f"{n} {d['id']} {host.get('name')} {display_target(host, d)} {d['app']} {w}x{h}"
                   f"{stream_settings(d.get('fps', 60), d.get('bitrate', 0))}{routes} "
@@ -1279,9 +1413,12 @@ def remote_command(args):
                 host["mic"] = v == "on"  # the stream playing its sound looks every 3 s
             elif k == "input" and v in ("on", "off"):
                 host["input"] = v == "on"  # its streams look every 3 s
+            elif apply_keyboard_kv(host, k, v):
+                pass  # ft-appless reloads kb_layout and keymap within 2 s
             else:
                 raise RuntimeError(f"remote host: {kv!r}? (route=auto|network|dongle direct=ADDRESS[,ADDRESS]|none "
-                                   "mic=on|off input=on|off)")
+                                   "mic=on|off input=on|off kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none "
+                                   "keymap=FROM:TO[,...]|none)")
         save_layout(layout)
         if not restart:
             return
@@ -1461,9 +1598,12 @@ def remote_command(args):
                     not v or (v.isdigit() and ROUTE_LIMITS[key][0] <= int(v) <= ROUTE_LIMITS[key][1])):
                 set_route_setting(d, route, key, int(v) if v else None)
                 rerouted = True
+            elif apply_keyboard_kv(d, k, v):
+                pass  # ft-appless reloads kb_layout and keymap within 2 s
             else:
                 raise RuntimeError(f"remote set: {kv!r}? (size=WxH fps=F bitrate=KBPS label=TEXT app=APP metres=M "
-                                   "direct.fps=F direct.bitrate=KBPS network.fps=F network.bitrate=KBPS, "
+                                   "direct.fps=F direct.bitrate=KBPS network.fps=F network.bitrate=KBPS "
+                                   "kb_layout=qwerty|dvorak|dvorak-qwerty-cmd|colemak|none keymap=FROM:TO[,...]|none, "
                                    "empty for the display's own; fps 1-240, bitrate 0-500000)")
         save_layout(layout)
         if d.get("off"):

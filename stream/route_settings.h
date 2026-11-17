@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 constexpr int kRouteFpsMax = 240, kRouteBitrateMax = 500000;  // kbit/s; ft-layout checks the same
@@ -74,4 +75,58 @@ inline bool RouteSettings(const nlohmann::json &layout, const std::string &host,
         }
     }
     return false;
+}
+
+// Optional keyboard layout ("qwerty", "dvorak", "dvorak-qwerty-cmd", "colemak") and physical
+// key remaps ({"capslock": "leftctrl", ...}) merged from the host entry and display entry.
+struct RawKeyboardSettings {
+    std::string kb_layout;
+    std::vector<std::pair<std::string, std::string>> keymap;
+};
+
+inline RawKeyboardSettings KeyboardSettingsOf(const nlohmann::json &layout, const std::string &host,
+                                              const std::string &id) {
+    RawKeyboardSettings out;
+    if (!layout.is_object() || !layout.contains("hosts") || !layout["hosts"].is_array()) return out;
+
+    const nlohmann::json *matched_host = nullptr;
+    const nlohmann::json *matched_disp = nullptr;
+    for (int pass = 0; pass < 2 && !matched_disp && !id.empty(); ++pass) {
+        for (const auto &h : layout["hosts"]) {
+            if (!h.is_object() || !h.contains("displays") || !h["displays"].is_array()) continue;
+            if (pass == 0 && h.value("address", "") != host) continue;
+            for (const auto &d : h["displays"]) {
+                if (d.is_object() && d.value("client", "") == id) {
+                    matched_host = &h;
+                    matched_disp = &d;
+                    break;
+                }
+            }
+            if (matched_disp) break;
+        }
+    }
+    if (!matched_host) {
+        for (const auto &h : layout["hosts"]) {
+            if (h.is_object() && h.value("address", "") == host) {
+                matched_host = &h;
+                break;
+            }
+        }
+    }
+
+    auto merge_from = [&out](const nlohmann::json *obj) {
+        if (!obj || !obj->is_object()) return;
+        if (obj->contains("kb_layout") && (*obj)["kb_layout"].is_string()) {
+            const std::string v = (*obj)["kb_layout"].get<std::string>();
+            if (!v.empty()) out.kb_layout = v;
+        }
+        if (obj->contains("keymap") && (*obj)["keymap"].is_object()) {
+            for (auto it = (*obj)["keymap"].begin(); it != (*obj)["keymap"].end(); ++it) {
+                if (it.value().is_string()) out.keymap.emplace_back(it.key(), it.value().get<std::string>());
+            }
+        }
+    };
+    merge_from(matched_host);
+    merge_from(matched_disp);
+    return out;
 }

@@ -905,6 +905,123 @@ void TestInputKeyMappingAndMetaHoldback() {
     evs.clear();
     km.Blur(rec);
     CHECK(evs.size() == 2);
+
+    // 5. Key-name parser: digits never collide with KEY_ESC (1), aliases normalize cleanly.
+    uint32_t kc = 0;
+    CHECK(ParseEvdevKeyName("1", &kc) && kc == 2);
+    CHECK(ParseEvdevKeyName("0", &kc) && kc == 11);
+    CHECK(ParseEvdevKeyName("esc", &kc) && kc == 1);
+    CHECK(ParseEvdevKeyName("Caps_Lock", &kc) && kc == 58);
+    CHECK(ParseEvdevKeyName("left-ctrl", &kc) && kc == 29);
+    CHECK(ParseEvdevKeyName("ctrl", &kc) && kc == 29);
+    CHECK(ParseEvdevKeyName("cmd", &kc) && kc == 125);
+    CHECK(ParseEvdevKeyName("rcmd", &kc) && kc == 126);
+    CHECK(ParseEvdevKeyName("f12", &kc) && kc == 88);
+    CHECK(ParseEvdevKeyName("code:58", &kc) && kc == 58);
+    CHECK(!ParseEvdevKeyName("code:194", &kc));  // F24 reserved internal cancel signal
+    CHECK(!ParseEvdevKeyName("none", &kc, false));
+    CHECK(ParseEvdevKeyName("none", &kc, true) && kc == 0);
+
+    // 6. Full ANSI Dvorak 47-key layout verification: all 26 letters form a bijection onto a..z,
+    //    shifted + Caps Lock obey letter-vs-punctuation rules, and moved punctuation is exact.
+    std::set<char> dv_letters, dv_letters_upper;
+    static constexpr uint32_t kAllPrintableEvdev[] = {
+        41, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 43,
+        30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+        44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+    };
+    for (uint32_t ev : kAllPrintableEvdev) {
+        const uint32_t lo = EvdevKeyMapper::LookupKeysym(ev, false, false, KeyboardLayout::kDvorak);
+        const uint32_t hi = EvdevKeyMapper::LookupKeysym(ev, true, false, KeyboardLayout::kDvorak);
+        const uint32_t cap = EvdevKeyMapper::LookupKeysym(ev, false, true, KeyboardLayout::kDvorak);
+        CHECK(lo >= 0x20 && lo <= 0x7e && hi >= 0x20 && hi <= 0x7e);
+        if (lo >= 'a' && lo <= 'z') {
+            dv_letters.insert(char(lo));
+            dv_letters_upper.insert(char(hi));
+            CHECK(cap == hi);  // Caps Lock uppercases letters
+            CHECK(EvdevKeyMapper::LookupKeysym(ev, true, true, KeyboardLayout::kDvorak) == lo);
+        } else {
+            CHECK(cap == lo);  // Caps Lock never shifts punctuation or digits
+        }
+    }
+    CHECK(dv_letters.size() == 26 && dv_letters_upper.size() == 26);
+    CHECK(EvdevKeyMapper::LookupKeysym(12, false, false, KeyboardLayout::kDvorak) == '[');
+    CHECK(EvdevKeyMapper::LookupKeysym(12, true, false, KeyboardLayout::kDvorak) == '{');
+    CHECK(EvdevKeyMapper::LookupKeysym(13, false, false, KeyboardLayout::kDvorak) == ']');
+    CHECK(EvdevKeyMapper::LookupKeysym(13, true, false, KeyboardLayout::kDvorak) == '}');
+    CHECK(EvdevKeyMapper::LookupKeysym(16, false, false, KeyboardLayout::kDvorak) == '\'');
+    CHECK(EvdevKeyMapper::LookupKeysym(16, true, false, KeyboardLayout::kDvorak) == '"');
+    CHECK(EvdevKeyMapper::LookupKeysym(17, false, false, KeyboardLayout::kDvorak) == ',');
+    CHECK(EvdevKeyMapper::LookupKeysym(18, false, false, KeyboardLayout::kDvorak) == '.');
+    CHECK(EvdevKeyMapper::LookupKeysym(26, false, false, KeyboardLayout::kDvorak) == '/');
+    CHECK(EvdevKeyMapper::LookupKeysym(27, false, false, KeyboardLayout::kDvorak) == '=');
+    CHECK(EvdevKeyMapper::LookupKeysym(31, false, false, KeyboardLayout::kDvorak) == 'o');
+    CHECK(EvdevKeyMapper::LookupKeysym(32, false, false, KeyboardLayout::kDvorak) == 'e');
+    CHECK(EvdevKeyMapper::LookupKeysym(33, false, false, KeyboardLayout::kDvorak) == 'u');
+    CHECK(EvdevKeyMapper::LookupKeysym(39, false, false, KeyboardLayout::kDvorak) == 's');
+    CHECK(EvdevKeyMapper::LookupKeysym(40, false, false, KeyboardLayout::kDvorak) == '-');
+    CHECK(EvdevKeyMapper::LookupKeysym(44, false, false, KeyboardLayout::kDvorak) == ';');
+    CHECK(EvdevKeyMapper::LookupKeysym(46, false, false, KeyboardLayout::kDvorak) == 'j');
+    CHECK(EvdevKeyMapper::LookupKeysym(23, false, false, KeyboardLayout::kDvorak) == 'c');
+    CHECK(EvdevKeyMapper::LookupKeysym(53, false, false, KeyboardLayout::kDvorak) == 'z');
+
+    // 7. Dvorak + Caps Lock -> Left Control: no Caps Lock toggle, Control_L ref-counted across
+    //    both physical Caps Lock (58) and Left Ctrl (29), and live SetConfig releases held keys.
+    KeyboardMappingConfig dv_cfg;
+    ApplyKeyboardSettings("dvorak", {{"capslock", "leftctrl"}}, &dv_cfg);
+    CHECK(dv_cfg.layout == KeyboardLayout::kDvorak && dv_cfg.keymap.at(58) == 29);
+
+    EvdevKeyMapper dkm(dv_cfg);
+    evs.clear();
+    dkm.Process(58, true, rec);   // Caps Lock down -> Control_L (0xffe3) down
+    dkm.Process(29, true, rec);   // Physical Left Ctrl down -> refcount 2, no duplicate down
+    dkm.Process(29, false, rec);  // Physical Left Ctrl up -> refcount 1, Control_L stays held!
+    dkm.Process(23, true, rec);   // Physical 'I' -> Dvorak 'c' while Control_L held
+    dkm.Process(23, false, rec);
+    dkm.Process(58, false, rec);  // Caps Lock up -> Control_L released
+    dkm.Process(30, true, rec);   // Physical 'A' -> lowercase 'a' (proving caps_ never toggled!)
+    dkm.Process(30, false, rec);
+    CHECK(evs.size() == 6);
+    CHECK(evs[0] == std::make_pair(true, uint32_t(0xffe3)));
+    CHECK(evs[1] == std::make_pair(true, uint32_t('c')));
+    CHECK(evs[2] == std::make_pair(false, uint32_t('c')));
+    CHECK(evs[3] == std::make_pair(false, uint32_t(0xffe3)));
+    CHECK(evs[4] == std::make_pair(true, uint32_t('a')));
+    CHECK(evs[5] == std::make_pair(false, uint32_t('a')));
+
+    // 8. dvorak-qwerty-cmd: Dvorak when typing, QWERTY positions while Command is held.
+    KeyboardMappingConfig dqc_cfg;
+    ApplyKeyboardSettings("dvorak-qwerty-cmd", {{"leftalt", "leftmeta"}}, &dqc_cfg);
+    EvdevKeyMapper qkm(dqc_cfg);
+    evs.clear();
+    qkm.Process(46, true, rec);   // Physical 'C' alone -> Dvorak 'j'
+    qkm.Process(46, false, rec);
+    qkm.Process(56, true, rec);   // Physical Left Alt -> remapped to Left Meta (held back)
+    qkm.Process(46, true, rec);   // Physical 'C' while Meta held -> QWERTY 'c' + flushes Command_L!
+    qkm.Process(46, false, rec);
+    qkm.Process(56, false, rec);
+    CHECK(evs.size() == 6);
+    CHECK(evs[0] == std::make_pair(true, uint32_t('j')));
+    CHECK(evs[1] == std::make_pair(false, uint32_t('j')));
+    CHECK(evs[2] == std::make_pair(true, uint32_t(0xffeb)));
+    CHECK(evs[3] == std::make_pair(true, uint32_t('c')));
+    CHECK(evs[4] == std::make_pair(false, uint32_t('c')));
+    CHECK(evs[5] == std::make_pair(false, uint32_t(0xffeb)));
+
+    // 9. Hot-reloading SetConfig mid-keypress releases held keys and clears stale Caps Lock if remapped.
+    EvdevKeyMapper hot;
+    evs.clear();
+    hot.Process(58, true, rec);   // Toggle Caps Lock ON on default QWERTY
+    hot.Process(58, false, rec);
+    hot.Process(30, true, rec);   // Hold 'A' (currently 'A' due to Caps Lock)
+    evs.clear();
+    hot.SetConfig(dv_cfg, rec);   // Releases 'A' and clears caps_ because 58 is now remapped
+    CHECK(evs.size() == 1 && evs[0] == std::make_pair(false, uint32_t('A')));
+    evs.clear();
+    hot.Process(31, true, rec);   // Physical 'S' -> lowercase Dvorak 'o'
+    hot.Process(31, false, rec);
+    CHECK(evs.size() == 2 && evs[0] == std::make_pair(true, uint32_t('o')));
 }
 
 void TestRfc3640AudioAndCredsStore() {

@@ -103,6 +103,37 @@ class RemoteAppleTest(unittest.TestCase):
             self.assertTrue(self.m.host_answers(host))
         self.assertEqual(probed, [("mac.local", 5900)])
 
+    def test_set_and_host_configure_keyboard_layout_and_keymap(self):
+        with redirect_stdout(io.StringIO()):
+            self.m.remote_command(["add", "Magma Llama", "Magma-Llama.local", "apple:virtual@1"])
+        self.m.remote_command(["host", "Magma Llama", "kb_layout=qwerty", "keymap=leftalt:cmd"])
+        self.m.remote_command(["set", "magma-llama-virtual", "kb_layout=dvorak", "keymap=caps:ctrl"])
+        host = self.hosts()[0]
+        disp = host["displays"][0]
+        self.assertEqual(host["kb_layout"], "qwerty")
+        self.assertEqual(host["keymap"], {"leftalt": "leftmeta"})
+        self.assertEqual(disp["kb_layout"], "dvorak")
+        self.assertEqual(disp["keymap"], {"capslock": "leftctrl"})
+
+        listed = io.StringIO()
+        with redirect_stdout(listed):
+            self.m.remote_command(["list"])
+        self.assertIn("kb dvorak keymap leftalt:leftmeta,capslock:leftctrl", listed.getvalue())
+
+        self.m.remote_command(["set", "magma-llama-virtual", "kb_layout=none", "keymap="])
+        self.m.remote_command(["host", "Magma Llama", "kb_layout=", "keymap=none"])
+        host = self.hosts()[0]
+        disp = host["displays"][0]
+        self.assertNotIn("kb_layout", host)
+        self.assertNotIn("keymap", host)
+        self.assertNotIn("kb_layout", disp)
+        self.assertNotIn("keymap", disp)
+
+        with self.assertRaises(RuntimeError):
+            self.m.remote_command(["set", "magma-llama-virtual", "kb_layout=azerty-bogus"])
+        with self.assertRaises(RuntimeError):
+            self.m.remote_command(["set", "magma-llama-virtual", "keymap=capslock:notakey"])
+
 
 if __name__ == "__main__":
     unittest.main()
