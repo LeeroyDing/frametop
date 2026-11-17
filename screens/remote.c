@@ -75,7 +75,8 @@ struct remote {
 static struct remote g_remotes[FT_REMOTE_MAX];
 static struct wl_event_loop *g_loop;
 static bool g_vr;
-static char g_stream[PATH_MAX];  // ft-stream (found at start: a rebuild replaces our own file)
+static char g_stream[PATH_MAX];   // ft-stream (found at start: a rebuild replaces our own file)
+static char g_appless[PATH_MAX];  // ft-appless (MIT Apple High Performance Screen Sharing backend)
 // Which remote screen each mouse button (BTN_LEFT + n) went down on, -1 none. Vibepollo takes a
 // button's release only from the client that pressed it (mouse_press_owner in its input.cpp),
 // so a window carried onto another of the host's displays is dropped through the stream it was
@@ -210,9 +211,13 @@ static int readable(int fd, uint32_t mask, void *data) {
 }
 
 // <repo>/screens/build/ft-screens -> <repo>/stream/build/ft-stream, or $FT_STREAM.
-static bool stream_path(char *out, size_t size) {
-    const char *env = getenv("FT_STREAM");
+static bool helper_path(const char *env_var, const char *fallback_env, const char *rel, char *out, size_t size) {
+    const char *env = getenv(env_var);
     if (env && *env) return snprintf(out, size, "%s", env) < (int)size;
+    if (fallback_env) {
+        const char *fb = getenv(fallback_env);
+        if (fb && *fb) return snprintf(out, size, "%s", fb) < (int)size;
+    }
     char exe[PATH_MAX];
     if (!realpath("/proc/self/exe", exe)) return false;  // gone already: ft-screens was rebuilt
     for (int up = 0; up < 3; ++up) {
@@ -220,8 +225,10 @@ static bool stream_path(char *out, size_t size) {
         if (!slash) return false;
         *slash = 0;
     }
-    return snprintf(out, size, "%s/stream/build/ft-stream", exe) < (int)size;
+    return snprintf(out, size, "%s/%s", exe, rel) < (int)size;
 }
+
+static bool is_apple_app(const char *app) { return !strncmp(app, "apple:", 6); }
 
 static void log_path(const struct remote *r, char *out, size_t size) {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
@@ -233,7 +240,7 @@ static bool start_stream(struct remote *r) {
     r->quit_at = 0;
     r->started_ms = now_ms();
     snprintf(r->state, sizeof r->state, "lost");
-    char *exe = g_stream, log[PATH_MAX];
+    char *exe = is_apple_app(r->app) ? g_appless : g_stream, log[PATH_MAX];
     if (!*exe) return false;
     log_path(r, log, sizeof log);
     int sv[2];
@@ -326,7 +333,8 @@ static bool host_busy(const struct remote *r) {
 void ft_remote_init(struct wl_event_loop *loop, bool vr) {
     g_loop = loop;
     g_vr = vr;
-    if (!stream_path(g_stream, sizeof g_stream)) g_stream[0] = 0;
+    if (!helper_path("FT_STREAM", NULL, "stream/build/ft-stream", g_stream, sizeof g_stream)) g_stream[0] = 0;
+    if (!helper_path("FT_APPLESS", "FT_STREAM", "stream/build/ft-appless", g_appless, sizeof g_appless)) g_appless[0] = 0;
     for (int i = 0; i < FT_REMOTE_MAX; ++i) g_remotes[i].fd = -1, g_remotes[i].shown = -1;
 }
 
@@ -491,7 +499,7 @@ bool ft_remote_command(const char *cmd, char *reply, int size) {
     if (sscanf(cmd, "remote %*d start %63s %63s %191s %dx%d %d %d %lf %n", c.client, c.host, c.app, &c.width, &c.height,
                &c.fps, &c.bitrate, &c.metres, &label_at) != 8)
         return snprintf(reply, size, "error remote <N> start <client> <host> <app> <W>x<H> <fps> <kbit/s> <metres> [label]"), true;
-    if (!plain(c.client, "._-") || !plain(c.host, ".:-") || !plain(c.app, "{}._:-"))
+    if (!plain(c.client, "._-") || !plain(c.host, ".:-") || !plain(c.app, "{}._:@-"))
         return snprintf(reply, size, "error client, host or app has other characters"), true;
     if (c.width < 64 || c.height < 64 || c.width > 8192 || c.height > 8192 || c.fps < 1 || c.fps > 240 ||
         c.bitrate < 0 || c.bitrate > 500000 || !(c.metres >= 0.15 && c.metres <= 20))
@@ -500,6 +508,8 @@ bool ft_remote_command(const char *cmd, char *reply, int size) {
     const bool same = r && !strcmp(r->client, c.client) && !strcmp(r->host, c.host) && !strcmp(r->app, c.app) &&
                       r->width == c.width && r->height == c.height && r->fps == c.fps && r->bitrate == c.bitrate;
     if (same) return snprintf(reply, size, "ok running"), true;
+    const char *want_exe = is_apple_app(c.app) ? g_appless : g_stream;
+    if (!*want_exe) return snprintf(reply, size, "error no stream helper next to ft-screens"), true;
     if (!r) {
         for (int i = 0; i < FT_REMOTE_MAX && !r; ++i)
             if (!g_remotes[i].used && g_remotes[i].pid == 0) r = &g_remotes[i];
@@ -515,7 +525,6 @@ bool ft_remote_command(const char *cmd, char *reply, int size) {
     memcpy(r->app, c.app, sizeof r->app);
     memcpy(r->label, c.label, sizeof r->label);
     r->width = c.width, r->height = c.height, r->fps = c.fps, r->bitrate = c.bitrate, r->metres = c.metres;
-    if (!*g_stream) return snprintf(reply, size, "error no ft-stream next to ft-screens (or $FT_STREAM)"), true;
     char log[PATH_MAX];
     log_path(r, log, sizeof log);
     const int f = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);  // a fresh log

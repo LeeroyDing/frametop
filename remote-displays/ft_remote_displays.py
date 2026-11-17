@@ -80,6 +80,10 @@ def pin_path(address):
     return os.path.join(TOKEN_DIR, f"{address}.pin")
 
 
+def apple_path(address):
+    return os.path.join(TOKEN_DIR, f"{re.sub(r'[^A-Za-z0-9._-]', '', address) or 'host'}.apple")
+
+
 def write_private(path, text):
     os.makedirs(TOKEN_DIR, mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
@@ -253,14 +257,19 @@ class Backend(QObject):
                     state = self._states.get(n, "not running")
                 displays.append({"id": d["id"], "number": n, "label": d.get("label") or d["id"], "app": d["app"],
                                  "key": f"{d['app']}@{d['port']}" if d.get("port") else d["app"],
-                                 "virtual": d["app"] == "monitor", "width": int(w), "height": int(hh),
+                                 "virtual": d["app"] == "monitor" or str(d["app"]).startswith("apple:virtual"),
+                                 "width": int(w), "height": int(hh),
                                  "fps": int(d.get("fps", 60)), "bitrate": int(d.get("bitrate", 0)),
                                  "metres": ft_layout.remote_size(d)[0], "shown": not d.get("hidden"),
                                  "connected": not d.get("off"), "state": state})
             address = h.get("address", "")
-            sunshine = h.get("kind") == "sunshine"
-            out.append({"name": h.get("name", ""), "address": address, "kind": h.get("kind", "vibepollo"),
-                        "hasToken": address in self._logins if sunshine else os.path.exists(token_path(address)),
+            kind = h.get("kind", "vibepollo")
+            sunshine = kind == "sunshine"
+            has_token = (address in self._logins if sunshine
+                         else os.path.exists(apple_path(address)) if kind == "apple"
+                         else os.path.exists(token_path(address)))
+            out.append({"name": h.get("name", ""), "address": address, "kind": kind,
+                        "hasToken": has_token,
                         "online": self._online.get(address), "route": h.get("route", "auto"),
                         "direct": ", ".join(h.get("direct", [])), "mic": bool(h.get("mic")),
                         "input": bool(h.get("input")),
@@ -270,14 +279,17 @@ class Backend(QObject):
     # --- hosts ---
     @Slot()
     def discoverHosts(self):
-        """Vibepollo (and Sunshine) computers on the network (answer: hostsFound)."""
+        """Vibepollo, Sunshine, and macOS Screen Sharing computers on the network (answer: hostsFound)."""
         def work():
-            try:
-                r = subprocess.run(host_command("avahi-browse", "-rpt", "_nvstream._tcp"), capture_output=True,
-                                   text=True, timeout=15)
-                found = parse_avahi(r.stdout)
-            except (OSError, subprocess.SubprocessError):
-                found = []
+            lines = []
+            for svc in ("_nvstream._tcp", "_rfb._tcp"):
+                try:
+                    r = subprocess.run(host_command("avahi-browse", "-rpt", svc), capture_output=True,
+                                       text=True, timeout=10)
+                    lines.append(r.stdout)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            found = parse_avahi("\n".join(lines))
             known = {h.get("address") for h in ft_layout.load_layout().get("hosts", [])}
             for h in found:
                 h["added"] = h["address"] in known
@@ -299,6 +311,8 @@ class Backend(QObject):
         if any(h.get("name") == name and h.get("address") != address for h in layout.get("hosts", [])):
             return self.signedIn.emit(name, False, f"There's already a host called {name}")
 
+        existing_kind = next((h.get("kind") for h in layout.get("hosts", []) if h.get("address") == address), None)
+
         def work():
             known = None
             try:
@@ -307,53 +321,71 @@ class Backend(QObject):
             except OSError:
                 pass
             error = ""
-            for target in ([dongle] if dongle else []) + [address]:
-                try:
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # self-signed: pinned below
-                    conn = http.client.HTTPSConnection(target, WEB_UI_PORT, timeout=15, context=ctx)
-                    conn.connect()
-                    pin = spki_pin(conn.sock.getpeercert(binary_form=True))
-                    if known and pin != known:
-                        conn.close()
-                        return self._signInDone.emit(name, address, dongle, "", "", "", "Its certificate isn't the "
-                                                     "one seen when it was added. If Vibepollo or Sunshine was "
-                                                     "installed again, remove the host and add it again.")
-                    basic = {"Authorization": "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()}
-                    conn.request("POST", "/api/token", json.dumps({"scopes": SCOPES}),
-                                 {**basic, "Content-Type": "application/json"})
-                    r = conn.getresponse()
-                    text = r.read().decode(errors="replace")
-                    # No tokens: plain Sunshine, which answers a POST to a path it doesn't have with a
-                    # bare 400 "Bad Request", before any login check (404 elsewhere). The login works if
-                    # it lists clients.
+            if existing_kind != "apple":
+                for target in ([dongle] if dongle else []) + [address]:
                     try:
-                        bare = r.status == 400 and json.loads(text).get("error") == "Bad Request"
-                    except (ValueError, AttributeError):
-                        bare = False
-                    if r.status == 404 or bare:
-                        conn.request("GET", "/api/clients/list", headers=basic)
+                        ctx = ssl.create_default_context()
+                        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # self-signed: pinned below
+                        conn = http.client.HTTPSConnection(target, WEB_UI_PORT, timeout=6, context=ctx)
+                        conn.connect()
+                        pin = spki_pin(conn.sock.getpeercert(binary_form=True))
+                        if known and pin != known:
+                            conn.close()
+                            return self._signInDone.emit(name, address, dongle, "", "", "", "Its certificate isn't the "
+                                                         "one seen when it was added. If Vibepollo or Sunshine was "
+                                                         "installed again, remove the host and add it again.")
+                        basic = {"Authorization": "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()}
+                        conn.request("POST", "/api/token", json.dumps({"scopes": SCOPES}),
+                                     {**basic, "Content-Type": "application/json"})
                         r = conn.getresponse()
-                        r.read()
+                        text = r.read().decode(errors="replace")
+                        # No tokens: plain Sunshine, which answers a POST to a path it doesn't have with a
+                        # bare 400 "Bad Request", before any login check (404 elsewhere). The login works if
+                        # it lists clients.
+                        try:
+                            bare = r.status == 400 and json.loads(text).get("error") == "Bad Request"
+                        except (ValueError, AttributeError):
+                            bare = False
+                        if r.status == 404 or bare:
+                            conn.request("GET", "/api/clients/list", headers=basic)
+                            r = conn.getresponse()
+                            r.read()
+                            conn.close()
+                            if r.status == 401:
+                                return self._signInDone.emit(name, address, dongle, "", "", "", "Wrong user name or password")
+                            if r.status != 200:
+                                return self._signInDone.emit(name, address, dongle, "", "", "",
+                                                             f"It didn't take the login ({r.status})")
+                            self._logins[address] = f"{user}\n{password}\n"
+                            return self._signInDone.emit(name, address, dongle, "", pin, "sunshine", "")
                         conn.close()
                         if r.status == 401:
                             return self._signInDone.emit(name, address, dongle, "", "", "", "Wrong user name or password")
-                        if r.status != 200:
+                        token = json.loads(text).get("token") if r.status == 200 else None
+                        if not token:
                             return self._signInDone.emit(name, address, dongle, "", "", "",
-                                                         f"It didn't take the login ({r.status})")
-                        self._logins[address] = f"{user}\n{password}\n"
-                        return self._signInDone.emit(name, address, dongle, "", pin, "sunshine", "")
-                    conn.close()
-                    if r.status == 401:
-                        return self._signInDone.emit(name, address, dongle, "", "", "", "Wrong user name or password")
-                    token = json.loads(text).get("token") if r.status == 200 else None
-                    if not token:
-                        return self._signInDone.emit(name, address, dongle, "", "", "",
-                                                     f"It didn't make a token ({r.status} {text[:120]})")
-                    return self._signInDone.emit(name, address, dongle, token, pin, "vibepollo", "")
-                except (OSError, ValueError, ssl.SSLError, http.client.HTTPException,
-                        subprocess.SubprocessError) as e:
+                                                         f"It didn't make a token ({r.status} {text[:120]})")
+                        return self._signInDone.emit(name, address, dongle, token, pin, "vibepollo", "")
+                    except (OSError, ValueError, ssl.SSLError, http.client.HTTPException,
+                            subprocess.SubprocessError) as e:
+                        error = str(e) or type(e).__name__
+
+            # macOS High Performance Screen Sharing (screensharingd on TCP 5900): verify & store
+            # credentials in ~/.local/share/frametop-stream/hosts/ADDRESS.apple (0600).
+            try:
+                code, out, err = ft_layout.run_appless("auth", address, "--login", timeout=20,
+                                                       stdin=f"{user}\n{password}\n")
+                if code == 0:
+                    return self._signInDone.emit(name, address, dongle, "", "", "apple", "")
+                apple_err = (err or out).strip().splitlines()[-1] if (err or out).strip() else ""
+                if apple_err and ("rejected" in apple_err or "SRP" in apple_err or existing_kind == "apple"):
+                    return self._signInDone.emit(name, address, dongle, "", "", "", apple_err)
+                if apple_err and not error:
+                    error = apple_err
+            except (OSError, subprocess.SubprocessError) as e:
+                if not error:
                     error = str(e) or type(e).__name__
+
             self._signInDone.emit(name, address, dongle, "", "", "", f"Couldn't reach it: {error}")
         threading.Thread(target=work, daemon=True).start()
 
@@ -362,14 +394,15 @@ class Backend(QObject):
             return self.signedIn.emit(name, False, error)
         if token:
             write_private(token_path(address), token)
-        write_private(pin_path(address), pin)
+        if pin:
+            write_private(pin_path(address), pin)
         layout = ft_layout.load_layout()
         host = next((h for h in layout.setdefault("hosts", []) if h.get("address") == address), None)
         if host is None:
             host = {"name": name, "address": address, "displays": []}
             layout["hosts"].append(host)
-        if kind == "sunshine":
-            host["kind"] = "sunshine"
+        if kind in ("sunshine", "apple"):
+            host["kind"] = kind
         else:
             host.pop("kind", None)
         if dongle and dongle not in host.get("direct", []):
@@ -400,7 +433,8 @@ class Backend(QObject):
         if not self._save(layout):
             return
         if not any(h.get("address") == host.get("address") for h in layout["hosts"]):
-            for path in (token_path(host.get("address", "")), pin_path(host.get("address", ""))):
+            addr = host.get("address", "")
+            for path in (token_path(addr), pin_path(addr), apple_path(addr)):
                 try:
                     os.remove(path)
                 except OSError:
@@ -505,6 +539,11 @@ class Backend(QObject):
 
         def work():
             monitors, error = [], ""
+            if host.get("kind") == "apple":
+                monitors = [{"app": "apple:physical", "port": 0, "key": "apple:physical",
+                             "name": "Main display", "width": 1920, "height": 1080,
+                             "primary": True, "active": True, "virtual": False}]
+                return self.monitorsReady.emit(address, monitors, "")
             if host.get("kind") == "sunshine":
                 monitors = self._sunshine_monitors(address)
                 return self.monitorsReady.emit(address, monitors, "" if monitors else "no Sunshine instance answers")

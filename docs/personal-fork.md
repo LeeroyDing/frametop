@@ -1,8 +1,8 @@
-# Personal fork: KWin 6.6 scaling, per-network streams and the slow-hands alert
+# Personal fork: KWin 6.6 scaling, per-network streams, Apple Screen Sharing and the slow-hands alert
 
 The `personal` branch is based on `kwin-6.6-output-scale` (`3b039d0`): upstream `experimental` (`fdfd96e`, the `v0.3.0` development line) plus the KWin 6.6 nested output scaling commit. Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); this fork is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
 
-Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, a sturdier way for ft-screens to find its tools, two fixes to the KWin 6.6 scaling (also on its pull request), and this fork reference.
+Upstream already includes the controls guide, `layout/countdown/`, and geometry-only screen reset through PR #67 (`7fab7e1`). They are inherited from the base. The old IDR throttle and its revert cancel out and are omitted from this history. The commits above `3b039d0` carry per-network stream settings, moving a running stream to an available direct address, a native Apple High Performance Screen Sharing backend (`ft-appless`), a sturdier way for ft-screens to find its tools, two fixes to the KWin 6.6 scaling (also on its pull request), and this fork reference.
 
 ## KWin 6.6 nested output scaling
 
@@ -28,6 +28,21 @@ A stream that goes through the host's own address with route `auto` keeps checki
 - `stream/route_settings.h`: a display's settings for a route, a host's route and direct addresses, and the two-in-a-row rule for switching; `stream/tests/route_settings_test.cpp` tests them (`scripts/test-route-settings.sh`).
 - `stream/ft-stream.cpp`: applies the settings once the route is chosen, before working out the default bitrate, and watches for a direct address while on the host's own (`WatchDirect`).
 - `layout/ft_layout.py`: `remote set ROUTE.fps=F ROUTE.bitrate=KBPS` and `remote list`; `layout/tests/test_remote_routes.py` tests them.
+
+## Apple High Performance Screen Sharing
+
+An Apple Silicon Mac with Screen Sharing or Remote Management turned on (`screensharingd`, TCP and UDP port 5900) can stream directly to Frametop without Sunshine or Vibepollo. `stream/ft-appless.cpp` speaks Apple's High Performance Screen Sharing session (RFB 3.889 RSA1/SRP-6a Type 36 authentication, `enc1103` AES-128-CBC control channel, and `AVConference` H.264 + AAC-ELD 48 kHz stereo SRTP over UDP 5900), rewrites `pic_order_cnt_type` 0 to 2 before feeding `qcom-iris` (`/dev/video-dec0`) for zero-frame DPB hold, converts full-range BT.709 `Q08C` UBWC into `ft-screens`'s three-buffer RGBA UBWC ring, forwards scaled pointer, scroll, and keyboard input, and plays host audio through `libfdk-aac` and `libpulse-simple`.
+
+```sh
+layout/ft-layout remote auth 192.168.1.178 --login   # macOS user<TAB>password on stdin -> 0600 ~/.local/share/frametop-stream/hosts/192.168.1.178.apple
+layout/ft-layout remote add 192.168.1.178 apple:virtual --host Space-Odysseus --name "Space-Odysseus: Virtual"
+layout/ft-layout remote host Space-Odysseus direct=192.168.1.143 route=auto
+```
+
+- `apple:virtual` (or `apple:virtual@2`) mounts an ephemeral 2x HiDPI Retina virtual display (`3840x2160` backing pixels, `1920x1080` logical points by default) that disappears cleanly when the session ends; `apple:virtual@1` requests 1x backing and `apple:physical` mirrors the Mac's main display.
+- `screens/remote.c`: dispatches any display whose `app` begins with `apple:` to `stream/build/ft-appless` while keeping Moonlight/Vibepollo displays on `stream/build/ft-stream`; `screens/tests/remote-test.c` tests both paths.
+- `stream/apple_hp.h` and `stream/ft-appless.cpp`: clean-room MIT protocol client, `0600` credential store, `EvdevKeyMapper`, RFC 3640 `AAC-ELD` depacketizer, route selection and `WatchDirect` on TCP 5900, and hardware decode loop; `stream/tests/apple_hp_test.cpp` tests them (`scripts/test-apple-hp.sh`).
+- `layout/ft_layout.py`, `remote-displays/ft_remote_displays.py`, and `remote-displays/main.qml`: CLI and GUI host discovery (`_rfb._tcp`), sign-in, display listing (`apple:physical` and `apple:virtual`), and credential cleanup; `layout/tests/test_remote_apple.py` tests them.
 
 ## Slow-hands alert
 
@@ -73,12 +88,13 @@ Run these offline checks from the checkout. The route-settings test requires a C
 ```sh
 ./scripts/test-screen-scale.sh
 ./scripts/test-route-settings.sh
+./scripts/test-apple-hp.sh
 python3 -m unittest discover -s layout/tests -v
 python3 -m unittest discover -s layout/countdown/tests -v
 git diff --check
 ```
 
-`just test` runs the layout and countdown suites in `test-python`, and both screen-scale and route-settings checks in `test-c`. The C/C++ test scripts compile locally wherever they run, so they work inside the image without SSH or a headset.
+`just test` runs the layout and countdown suites in `test-python`, and the screen-scale, route-settings, and Apple Screen Sharing checks in `test-c`. The C/C++ test scripts compile locally wherever they run, so they work inside the image without SSH or a headset.
 
 Live checks should cover scaled output sizes and placement on KWin 6.6, route-specific frame rate and bitrate, and a network stream moving to a newly available direct address. Repeat route checks while streaming without the desktop. Arrange any live headset checks with its wearer first.
 

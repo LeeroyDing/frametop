@@ -48,8 +48,10 @@ vr="$OPENVR_LIBS"
 g++ $flags -I$mlc/src -I$src/libgamestream -I$src/src -o build/ft-stream ft-stream.cpp host.cpp build/gamestream/*.o \
   build/mlc/libmoonlight-common-c.a build/mlc/enet/libenet.a \
   $(pkg-config --libs gbm egl glesv2 libcurl openssl expat uuid opus libpulse-simple) -lpthread $vr
-strip --strip-unneeded build/ft-stream
-echo "built build/ft-stream"
+g++ $flags $(pkg-config --cflags openssl libpulse-simple nlohmann_json) -o build/ft-appless ft-appless.cpp \
+  $(pkg-config --libs gbm egl glesv2 openssl libpulse-simple) -lz -ldl -lpthread $vr
+strip --strip-unneeded build/ft-stream build/ft-appless
+echo "built build/ft-stream build/ft-appless"
 [ $spikes = 1 ] || exit 0
 g++ $flags -o build/ft-dectest spike/ft-dectest.cpp $(pkg-config --libs gbm egl glesv2) $vr
 g++ $flags -I$mlc/src -I$src/libgamestream -o build/ft-streamtest spike/ft-streamtest.cpp host.cpp build/gamestream/*.o \

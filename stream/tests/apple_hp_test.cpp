@@ -809,6 +809,97 @@ void TestZeroDelayPoc2Rewrite() {
     CHECK(std::memcmp(patched_rbsp.data() + pay_off, cabac_payload.data(), cabac_payload.size()) == 0);
 }
 
+void TestInputKeyMappingAndMetaHoldback() {
+    const auto ke = BuildKeyEvent(true, 0xffeb);
+    CHECK(ke.size() == 8 && ke[0] == 0x04 && ke[1] == 1 && ReadBe32(&ke[4]) == 0xffeb);
+    const auto pe = BuildPointerEvent(0x05, 960, 540);
+    CHECK(pe.size() == 6 && pe[0] == 0x05 && pe[1] == 0x05 && ReadBe16(&pe[2]) == 960 && ReadBe16(&pe[4]) == 540);
+
+    // 4K Retina backing (3840x2160) -> 1080p logical points (1920x1080)
+    CHECK(ScalePointerCoord(0.0, 3840, 1920) == 0);
+    CHECK(ScalePointerCoord(1920.0, 3840, 1920) == 960);
+    CHECK(ScalePointerCoord(3839.0, 3840, 1920) == 1919);
+    CHECK(ScalePointerCoord(9999.0, 3840, 1920) == 1919);
+    CHECK(MouseButtonBit(0x110) == 0x01 && MouseButtonBit(0x112) == 0x02 && MouseButtonBit(0x111) == 0x04);
+
+    // Verify Command vs Option keysym mapping matches ScreensharingAgent KeyMap.c:
+    // KEY_LEFTMETA (125) -> 0xffeb (Super_L -> Command), KEY_LEFTALT (56) -> 0xffe7 (Meta_L -> Option).
+    CHECK(EvdevKeyMapper::LookupKeysym(125, false, false) == 0xffeb);
+    CHECK(EvdevKeyMapper::LookupKeysym(126, false, false) == 0xffec);
+    CHECK(EvdevKeyMapper::LookupKeysym(56, false, false) == 0xffe7);
+    CHECK(EvdevKeyMapper::LookupKeysym(100, false, false) == 0xffe8);
+
+    EvdevKeyMapper km;
+    std::vector<std::pair<bool, uint32_t>> evs;
+    auto rec = [&](bool d, uint32_t ks) { evs.emplace_back(d, ks); };
+
+    // 1. Shift + KEY_1 ('!'), releasing Shift BEFORE releasing KEY_1 still releases '!' cleanly.
+    km.Process(42, true, rec);   // Shift_L down
+    km.Process(2, true, rec);    // KEY_1 down -> '!'
+    km.Process(42, false, rec);  // Shift_L up
+    km.Process(2, false, rec);   // KEY_1 up -> '!'
+    CHECK(evs.size() == 4);
+    CHECK(evs[0] == std::make_pair(true, uint32_t(0xffe1)));
+    CHECK(evs[1] == std::make_pair(true, uint32_t('!')));
+    CHECK(evs[2] == std::make_pair(false, uint32_t(0xffe1)));
+    CHECK(evs[3] == std::make_pair(false, uint32_t('!')));
+
+    // 2. Meta + F24 suppression (Frametop shortcut eaten -> zero Command events sent to macOS).
+    evs.clear();
+    km.Process(125, true, rec);   // Meta held back
+    CHECK(evs.empty());
+    km.Process(194, true, rec);   // KEY_F24 cancels held Meta
+    km.Process(194, false, rec);
+    km.Process(125, false, rec);
+    CHECK(evs.empty());
+
+    // 3. Meta solo tap emits Command down + up on release.
+    km.Process(125, true, rec);
+    CHECK(evs.empty());
+    km.Process(125, false, rec);
+    CHECK(evs.size() == 2 && evs[0] == std::make_pair(true, uint32_t(0xffeb)) &&
+          evs[1] == std::make_pair(false, uint32_t(0xffeb)));
+
+    // 4. Meta + C flushes Command down before 'c' down, and Blur releases held keys.
+    evs.clear();
+    km.Process(125, true, rec);
+    km.Process(46, true, rec);  // KEY_C ('c')
+    CHECK(evs.size() == 2 && evs[0] == std::make_pair(true, uint32_t(0xffeb)) &&
+          evs[1] == std::make_pair(true, uint32_t('c')));
+    evs.clear();
+    km.Blur(rec);
+    CHECK(evs.size() == 2);
+}
+
+void TestRfc3640AudioAndCredsStore() {
+    // Single-AU RFC 3640 packet: [0x00, 0x10, (5 << 3), 0xaa, 0xbb, 0xcc, 0xdd, 0xee]
+    const std::vector<uint8_t> single_pkt = {0x00, 0x10, 0x00, 0x28, 0xaa, 0xbb, 0xcc, 0xdd, 0xee};
+    std::vector<std::vector<uint8_t>> aus;
+    ParseRfc3640AuPayloads(single_pkt.data(), single_pkt.size(), &aus);
+    CHECK(aus.size() == 1 && aus[0] == std::vector<uint8_t>({0xaa, 0xbb, 0xcc, 0xdd, 0xee}));
+
+    // Multi-AU RFC 3640 packet: 2 AUs of 3 bytes and 2 bytes (hdr_bits = 32 = 0x0020)
+    aus.clear();
+    const std::vector<uint8_t> multi_pkt = {0x00, 0x20, 0x00, 0x18, 0x00, 0x10, 1, 2, 3, 4, 5};
+    ParseRfc3640AuPayloads(multi_pkt.data(), multi_pkt.size(), &aus);
+    CHECK(aus.size() == 2 && aus[0] == std::vector<uint8_t>({1, 2, 3}) && aus[1] == std::vector<uint8_t>({4, 5}));
+
+    // Private 0600 credential file roundtrip + permission enforcement
+    char tmp_dir[] = "/tmp/ft-apple-creds-XXXXXX";
+    CHECK(mkdtemp(tmp_dir) != nullptr);
+    const std::string cpath = AppleCredsPath("Space-Odysseus.local", tmp_dir);
+    CHECK(SaveAppleCreds(cpath, "leeroy", "s3cr3t-test-value"));
+    struct stat st{};
+    CHECK(stat(cpath.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+    std::string u, p;
+    CHECK(LoadAppleCreds(cpath, &u, &p) && u == "leeroy" && p == "s3cr3t-test-value");
+    // World-readable file must be rejected by LoadAppleCreds
+    chmod(cpath.c_str(), 0644);
+    CHECK(!LoadAppleCreds(cpath, &u, &p));
+    unlink(cpath.c_str());
+    rmdir(tmp_dir);
+}
+
 }  // namespace
 
 int main() {
@@ -820,6 +911,8 @@ int main() {
     TestAvcConfig0x92AndSpsPatch();
     TestH264RtpAssembler();
     TestZeroDelayPoc2Rewrite();
+    TestInputKeyMappingAndMetaHoldback();
+    TestRfc3640AudioAndCredsStore();
     TestFullLoopbackSession();
     std::printf("apple_hp_test: all %d checks passed\n", g_checks);
     return 0;

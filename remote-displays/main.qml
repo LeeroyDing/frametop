@@ -224,7 +224,8 @@ Kirigami.ApplicationWindow {
                 if (chosen[m.key]) backend.addDisplay(host, m.app, m.name, m.width, m.height, fps, kbps, m.port)
             if (virtualChosen) {
                 const r = backend.resolutions[displayRes.currentIndex]
-                backend.addDisplay(host, "monitor", "Virtual", r.width, r.height, fps, kbps, 0)
+                const vapp = kind === "apple" ? "apple:virtual" : "monitor"
+                backend.addDisplay(host, vapp, "Virtual", r.width, r.height, fps, kbps, 0)
             }
             if (kind === "sunshine") backend.forgetLogin(address)  // queued with each display
         }
@@ -358,6 +359,7 @@ Kirigami.ApplicationWindow {
                         readonly property bool anyConnected: modelData.displays.some(d => d.connected)
                         // Sunshine keeps no token: adding displays signs in first, every time.
                         readonly property bool sunshine: modelData.kind === "sunshine"
+                        readonly property bool vibepollo: modelData.kind !== "sunshine" && modelData.kind !== "apple"
                         Layout.fillWidth: true
                         contentItem: ColumnLayout {
                             RowLayout {
@@ -473,10 +475,10 @@ Kirigami.ApplicationWindow {
                                     }
                                 }
                             }
-                            // The Frame's microphone rides along with its streams. Sunshine
-                            // and stock Vibepollo ignore it, so Sunshine hosts don't get the switch.
+                            // The Frame's microphone rides along with its streams. Sunshine, Apple
+                            // Screen Sharing and stock Vibepollo ignore it.
                             Controls.Switch {
-                                visible: !hostCard.sunshine
+                                visible: hostCard.vibepollo
                                 text: "Send my microphone"
                                 checked: hostCard.modelData.mic
                                 onToggled: backend.setMic(hostCard.modelData.name, checked)
@@ -486,9 +488,9 @@ Kirigami.ApplicationWindow {
                                 Controls.ToolTip.visible: hovered
                             }
                             // Its own keyboard and mouse, lent while the headset is worn. Only
-                            // Frametop's build lends them, so Sunshine hosts don't get the switch.
+                            // Frametop's build lends them, so non-Vibepollo hosts don't get the switch.
                             Controls.Switch {
-                                visible: !hostCard.sunshine
+                                visible: hostCard.vibepollo
                                 text: "Use this computer's keyboard and mouse"
                                 checked: hostCard.modelData.input
                                 onToggled: backend.setInput(hostCard.modelData.name, checked)

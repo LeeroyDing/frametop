@@ -10,6 +10,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -825,7 +826,8 @@ struct NegotiationKeys {
 inline std::vector<uint8_t> Build0x1cMessage(const std::vector<uint8_t> &audio_offer,
                                              const std::vector<uint8_t> &video_offer,
                                              const NegotiationKeys &keys,
-                                             bool bake_cursor = true) {
+                                             bool bake_cursor = true,
+                                             bool supports_60fps = true) {
     const uint16_t as = uint16_t(audio_offer.size());
     const uint16_t vs = uint16_t(video_offer.size());
     const uint16_t ms = uint16_t(as + vs + 0xd8);
@@ -833,8 +835,8 @@ inline std::vector<uint8_t> Build0x1cMessage(const std::vector<uint8_t> &audio_o
     buf[0] = 0x1c;
     WriteBe16(&buf[2], ms);
     WriteBe16(&buf[4], 3);
-    // Big-endian config_flags: 0x03 = 60fps + bake cursor; 0x07 = 60fps + strip cursor.
-    const uint32_t flags = bake_cursor ? 3u : 7u;
+    // Big-endian config_flags: bit 0 = 60fps (0 = 30fps), bit 1 = media v2, bit 2 = strip cursor.
+    const uint32_t flags = (bake_cursor ? 2u : 6u) | (supports_60fps ? 1u : 0u);
     WriteBe32(&buf[6], flags);
     WriteBe16(&buf[10], as);
     WriteBe16(&buf[12], vs);
@@ -995,7 +997,8 @@ inline std::vector<uint8_t> BuildFbuRequest(bool incremental, uint16_t x = 0, ui
 
 inline std::vector<uint8_t> BuildVirtualDisplay0x1d(uint32_t logical_w, uint32_t logical_h,
                                                     double hidpi_scale = 2.0, bool hdr = false,
-                                                    const std::string &name = "Frametop Virtual Display") {
+                                                    const std::string &name = "Frametop Virtual Display",
+                                                    double refresh_hz = 60.0) {
     constexpr uint16_t kModeCount = 5;
     constexpr uint16_t kDiSize = 0x9c + 28 * kModeCount;  // 296 bytes
     std::vector<uint8_t> di(kDiSize, 0);
@@ -1015,6 +1018,7 @@ inline std::vector<uint8_t> BuildVirtualDisplay0x1d(uint32_t logical_w, uint32_t
 
     static constexpr double kScales[kModeCount] = {1.0, 0.85, 0.75, 0.67, 0.5};
     const uint32_t mode_flags = hdr ? 1u : 0u;
+    const double hz = std::clamp(refresh_hz, 15.0, 120.0);
     for (uint16_t i = 0; i < kModeCount; ++i) {
         const uint32_t msw = std::max<uint32_t>(640, uint32_t(std::lround(logical_w * kScales[i])));
         const uint32_t msh = std::max<uint32_t>(360, uint32_t(std::lround(logical_h * kScales[i])));
@@ -1025,7 +1029,7 @@ inline std::vector<uint8_t> BuildVirtualDisplay0x1d(uint32_t logical_w, uint32_t
         WriteBe32(&di[m + 0x04], mh);
         WriteBe32(&di[m + 0x08], msw);
         WriteBe32(&di[m + 0x0c], msh);
-        WriteF64Be(&di[m + 0x10], 60.0);
+        WriteF64Be(&di[m + 0x10], hz);
         WriteBe32(&di[m + 0x18], mode_flags);
     }
 
@@ -1037,6 +1041,349 @@ inline std::vector<uint8_t> BuildVirtualDisplay0x1d(uint32_t logical_w, uint32_t
     AppendBe32(out, 0);
     out.insert(out.end(), di.begin(), di.end());
     return out;
+}
+
+// ── RFB Client Input Builders & Linux Evdev -> Apple Keysym Translator ───────
+
+inline std::vector<uint8_t> BuildKeyEvent(bool down, uint32_t keysym) {
+    std::vector<uint8_t> out = {0x04, uint8_t(down ? 1 : 0), 0x00, 0x00};
+    AppendBe32(out, keysym);
+    return out;
+}
+
+inline std::vector<uint8_t> BuildPointerEvent(uint8_t button_mask, uint16_t x, uint16_t y) {
+    std::vector<uint8_t> out = {0x05, button_mask};
+    AppendBe16(out, x);
+    AppendBe16(out, y);
+    return out;
+}
+
+inline uint16_t ScalePointerCoord(double stream_px, uint32_t stream_dim, uint16_t logical_dim) {
+    if (logical_dim == 0) return 0;
+    if (stream_dim == 0) {
+        const long c = std::lround(stream_px);
+        return uint16_t(std::clamp<long>(c, 0, long(logical_dim) - 1));
+    }
+    const double clamped = std::clamp(stream_px, 0.0, double(stream_dim - 1));
+    const double scaled = (clamped * double(logical_dim)) / double(stream_dim);
+    return uint16_t(std::clamp<long>(std::lround(scaled), 0, long(logical_dim) - 1));
+}
+
+inline uint8_t MouseButtonBit(uint32_t linux_btn) {
+    switch (linux_btn) {
+        case 0x110: return 0x01;  // BTN_LEFT
+        case 0x112: return 0x02;  // BTN_MIDDLE
+        case 0x111: return 0x04;  // BTN_RIGHT
+        default: return 0x00;
+    }
+}
+
+// Translates Linux evdev keycodes (<linux/input-event-codes.h>) to Apple ScreensharingAgent
+// X11 keysyms (verified against ScreensharingAgent KeyMapDictionary_ConvertKeysym):
+//   - Super_L/R (0xffeb/0xffec) -> kVK_Command / kVK_RightCommand (0x37/0x36)
+//   - Meta_L/R  (0xffe7/0xffe8) -> kVK_Option  / kVK_RightOption  (0x3a/0x3d)
+//   - Printable ASCII keys must carry their shifted keysym ('!' vs '1', 'A' vs 'a') when Shift
+//     is held because ScreensharingAgent's modifier merger derives Shift from the keysym entry.
+//   - Preserves Frametop's Meta holdback + KEY_F24 (194) combo suppression so Frametop hotkeys
+//     (Meta+Shift+R, etc.) never leak Command taps to macOS.
+class EvdevKeyMapper {
+public:
+    static constexpr uint32_t kEvKeyLeftShift = 42;
+    static constexpr uint32_t kEvKeyRightShift = 54;
+    static constexpr uint32_t kEvKeyCapsLock = 58;
+    static constexpr uint32_t kEvKeyLeftMeta = 125;
+    static constexpr uint32_t kEvKeyRightMeta = 126;
+    static constexpr uint32_t kEvKeyF24 = 194;
+
+    using EmitFn = std::function<void(bool down, uint32_t keysym)>;
+
+    static uint32_t LookupKeysym(uint32_t evdev, bool shift, bool caps) {
+        const bool upper = shift != caps;
+        if (evdev >= 16 && evdev <= 25) {
+            static constexpr char kRowQ[11] = "qwertyuiop";
+            static constexpr char kRowQS[11] = "QWERTYUIOP";
+            return uint32_t(uint8_t(upper ? kRowQS[evdev - 16] : kRowQ[evdev - 16]));
+        }
+        if (evdev >= 30 && evdev <= 38) {
+            static constexpr char kRowA[10] = "asdfghjkl";
+            static constexpr char kRowAS[10] = "ASDFGHJKL";
+            return uint32_t(uint8_t(upper ? kRowAS[evdev - 30] : kRowA[evdev - 30]));
+        }
+        if (evdev >= 44 && evdev <= 50) {
+            static constexpr char kRowZ[8] = "zxcvbnm";
+            static constexpr char kRowZS[8] = "ZXCVBNM";
+            return uint32_t(uint8_t(upper ? kRowZS[evdev - 44] : kRowZ[evdev - 44]));
+        }
+        if (evdev >= 2 && evdev <= 11) {
+            static constexpr char kNum[11] = "1234567890";
+            static constexpr char kNumS[11] = "!@#$%^&*()";
+            return uint32_t(uint8_t(shift ? kNumS[evdev - 2] : kNum[evdev - 2]));
+        }
+        switch (evdev) {
+            case 1:   return 0xff1b;  // KEY_ESC -> Escape
+            case 12:  return shift ? '_' : '-';
+            case 13:  return shift ? '+' : '=';
+            case 14:  return 0xff08;  // KEY_BACKSPACE -> BackSpace (kVK_Delete 0x33)
+            case 15:  return 0xff09;  // KEY_TAB -> Tab
+            case 26:  return shift ? '{' : '[';
+            case 27:  return shift ? '}' : ']';
+            case 28:  return 0xff0d;  // KEY_ENTER -> Return
+            case 29:  return 0xffe3;  // KEY_LEFTCTRL -> Control_L (0x3b)
+            case 39:  return shift ? ':' : ';';
+            case 40:  return shift ? '"' : '\'';
+            case 41:  return shift ? '~' : '`';
+            case 42:  return 0xffe1;  // KEY_LEFTSHIFT -> Shift_L (0x38)
+            case 43:  return shift ? '|' : '\\';
+            case 51:  return shift ? '<' : ',';
+            case 52:  return shift ? '>' : '.';
+            case 53:  return shift ? '?' : '/';
+            case 54:  return 0xffe2;  // KEY_RIGHTSHIFT -> Shift_R (0x3c)
+            case 55:  return 0xffaa;  // KEY_KPASTERISK -> KP_Multiply
+            case 56:  return 0xffe7;  // KEY_LEFTALT -> Meta_L -> Mac Option_L (0x3a)
+            case 57:  return 0x0020;  // KEY_SPACE
+            case 58:  return 0xffe5;  // KEY_CAPSLOCK -> Caps_Lock (0x39)
+            case 59: case 60: case 61: case 62: case 63:
+            case 64: case 65: case 66: case 67: case 68:
+                return 0xffbe + (evdev - 59);  // F1..F10
+            case 69:  return 0xff7f;  // KEY_NUMLOCK -> Clear
+            case 71:  return 0xffb7;  // KP_7
+            case 72:  return 0xffb8;  // KP_8
+            case 73:  return 0xffb9;  // KP_9
+            case 74:  return 0xffad;  // KP_Subtract
+            case 75:  return 0xffb4;  // KP_4
+            case 76:  return 0xffb5;  // KP_5
+            case 77:  return 0xffb6;  // KP_6
+            case 78:  return 0xffab;  // KP_Add
+            case 79:  return 0xffb1;  // KP_1
+            case 80:  return 0xffb2;  // KP_2
+            case 81:  return 0xffb3;  // KP_3
+            case 82:  return 0xffb0;  // KP_0
+            case 83:  return 0xffae;  // KP_Decimal
+            case 87:  return 0xffc8;  // F11
+            case 88:  return 0xffc9;  // F12
+            case 96:  return 0xff8d;  // KP_Enter
+            case 97:  return 0xffe4;  // KEY_RIGHTCTRL -> Control_R (0x3e)
+            case 98:  return 0xffaf;  // KP_Divide
+            case 100: return 0xffe8;  // KEY_RIGHTALT -> Meta_R -> Mac Option_R (0x3d)
+            case 102: return 0xff50;  // KEY_HOME
+            case 103: return 0xff52;  // KEY_UP
+            case 104: return 0xff55;  // KEY_PAGEUP
+            case 105: return 0xff51;  // KEY_LEFT
+            case 106: return 0xff53;  // KEY_RIGHT
+            case 107: return 0xff57;  // KEY_END
+            case 108: return 0xff54;  // KEY_DOWN
+            case 109: return 0xff56;  // KEY_PAGEDOWN
+            case 111: return 0xffff;  // KEY_DELETE -> Forward Delete (0x75)
+            case 117: return 0xffbd;  // KEY_KPEQUAL -> KP_Equal
+            case 125: return 0xffeb;  // KEY_LEFTMETA -> Super_L -> Mac Command_L (0x37)
+            case 126: return 0xffec;  // KEY_RIGHTMETA -> Super_R -> Mac Command_R (0x36)
+            case 183: case 184: case 185: case 186:
+            case 187: case 188: case 189: case 190:
+                return 0xffca + (evdev - 183);  // F13..F20
+            default:  return 0;
+        }
+    }
+
+    void Process(uint32_t code, bool down, const EmitFn &emit) {
+        if (code == kEvKeyF24) {
+            held_meta_ = 0;  // Frametop ate a Meta combo; suppress held Command.
+            return;
+        }
+        if (code == kEvKeyLeftShift) lshift_ = down;
+        else if (code == kEvKeyRightShift) rshift_ = down;
+        else if (code == kEvKeyCapsLock && down) caps_ = !caps_;
+
+        const bool is_meta = (code == kEvKeyLeftMeta || code == kEvKeyRightMeta);
+        if (down && is_meta && active_.find(code) == active_.end() && held_meta_ == 0) {
+            held_meta_ = code;
+            return;
+        }
+        if (!down && code == held_meta_) {
+            const uint32_t mks = LookupKeysym(held_meta_, false, false);
+            held_meta_ = 0;
+            if (mks) {
+                emit(true, mks);
+                emit(false, mks);
+            }
+            return;
+        }
+        if (down && held_meta_ != 0 && code != held_meta_) {
+            const uint32_t mks = LookupKeysym(held_meta_, false, false);
+            if (mks) {
+                active_[held_meta_] = mks;
+                emit(true, mks);
+            }
+            held_meta_ = 0;
+        }
+        if (down) {
+            const auto it = active_.find(code);
+            const uint32_t ks = (it != active_.end()) ? it->second : LookupKeysym(code, lshift_ || rshift_, caps_);
+            if (!ks) return;
+            active_[code] = ks;
+            emit(true, ks);
+        } else {
+            const auto it = active_.find(code);
+            if (it == active_.end()) return;
+            const uint32_t ks = it->second;
+            active_.erase(it);
+            emit(false, ks);
+        }
+    }
+
+    void Blur(const EmitFn &emit) {
+        held_meta_ = 0;
+        lshift_ = false;
+        rshift_ = false;
+        for (const auto &kv : active_) emit(false, kv.second);
+        active_.clear();
+    }
+
+private:
+    uint32_t held_meta_ = 0;
+    bool lshift_ = false;
+    bool rshift_ = false;
+    bool caps_ = false;
+    std::map<uint32_t, uint32_t> active_;
+};
+
+// ── RFC 3640 AAC-ELD RTP Depacketizer & Private Credential Store ─────────────
+
+// AVCAudioStream payload 101 (AAC-ELD / AAC-ELD-SBR) frames RTP payloads using RFC 3640
+// AU-headers ([au_headers_length_bits:16be][au_size:13 | au_index:3]...[au_data...]).
+// Falls back cleanly to a single raw AU if the header does not match payload bounds.
+inline void ParseRfc3640AuPayloads(const uint8_t *pay, size_t len, std::vector<std::vector<uint8_t>> *out_aus) {
+    if (!out_aus || len == 0) return;
+    if (len >= 4) {
+        const uint16_t hdr_bits = ReadBe16(pay);
+        if (hdr_bits >= 16 && (hdr_bits % 16) == 0) {
+            const size_t n_aus = hdr_bits / 16;
+            const size_t hdr_bytes = 2 + 2 * n_aus;
+            if (hdr_bytes < len) {
+                size_t total = 0;
+                std::vector<size_t> sizes(n_aus);
+                for (size_t i = 0; i < n_aus; ++i) {
+                    sizes[i] = size_t(ReadBe16(pay + 2 + 2 * i) >> 3);
+                    total += sizes[i];
+                }
+                if (hdr_bytes + total == len && total > 0) {
+                    size_t off = hdr_bytes;
+                    for (size_t sz : sizes) {
+                        if (sz > 0) out_aus->emplace_back(pay + off, pay + off + sz);
+                        off += sz;
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    out_aus->emplace_back(pay, pay + len);
+}
+
+inline std::string AppleCredsDir() {
+    const char *home = std::getenv("HOME");
+    return std::string(home && *home ? home : "/tmp") + "/.local/share/frametop-stream/hosts";
+}
+
+inline std::string SanitizeCredHost(const std::string &host) {
+    std::string out;
+    out.reserve(host.size());
+    for (char c : host) {
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '.' || c == '-' || c == '_') {
+            out.push_back(c);
+        }
+    }
+    return out.empty() ? "host" : out;
+}
+
+inline std::string AppleCredsPath(const std::string &host, const std::string &base_dir = "") {
+    const std::string dir = base_dir.empty() ? AppleCredsDir() : base_dir;
+    return dir + "/" + SanitizeCredHost(host) + ".apple";
+}
+
+inline bool EnsurePrivateDir(const std::string &dir) {
+    for (size_t pos = 1; pos <= dir.size(); ++pos) {
+        if (pos == dir.size() || dir[pos] == '/') {
+            const std::string sub = dir.substr(0, pos);
+            if (!sub.empty() && mkdir(sub.c_str(), 0700) != 0 && errno != EEXIST) return false;
+        }
+    }
+    chmod(dir.c_str(), 0700);
+    return true;
+}
+
+inline bool SaveAppleCreds(const std::string &path, const std::string &username, const std::string &password) {
+    if (username.empty() || password.empty()) return false;
+    const size_t slash = path.rfind('/');
+    if (slash != std::string::npos && !EnsurePrivateDir(path.substr(0, slash))) return false;
+    const std::string tmp = path + ".tmp." + std::to_string(getpid());
+    int flags = O_WRONLY | O_CREAT | O_TRUNC;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    const int fd = open(tmp.c_str(), flags, 0600);
+    if (fd < 0) return false;
+    fchmod(fd, 0600);
+    std::string body = username + "\n" + password + "\n";
+    const ssize_t n = write(fd, body.data(), body.size());
+    OPENSSL_cleanse(body.data(), body.size());
+    const int sync_rc = fsync(fd);
+    close(fd);
+    if (n != ssize_t(username.size() + password.size() + 2) || sync_rc != 0) {
+        unlink(tmp.c_str());
+        return false;
+    }
+    if (rename(tmp.c_str(), path.c_str()) != 0) {
+        unlink(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+inline bool LoadAppleCreds(const std::string &path, std::string *username_out, std::string *password_out) {
+    int flags = O_RDONLY;
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    const int fd = open(path.c_str(), flags);
+    if (fd < 0) return false;
+    struct stat st{};
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || (st.st_mode & 0077) != 0 || st.st_size <= 0 || st.st_size > 4096) {
+        close(fd);
+        return false;
+    }
+    std::string buf(size_t(st.st_size), '\0');
+    const ssize_t n = read(fd, buf.data(), buf.size());
+    close(fd);
+    if (n <= 0) {
+        OPENSSL_cleanse(buf.data(), buf.size());
+        return false;
+    }
+    buf.resize(size_t(n));
+    const size_t nl1 = buf.find('\n');
+    if (nl1 == std::string::npos) {
+        OPENSSL_cleanse(buf.data(), buf.size());
+        return false;
+    }
+    std::string u = buf.substr(0, nl1);
+    if (!u.empty() && u.back() == '\r') u.pop_back();
+    const size_t nl2 = buf.find('\n', nl1 + 1);
+    std::string p = (nl2 == std::string::npos) ? buf.substr(nl1 + 1) : buf.substr(nl1 + 1, nl2 - (nl1 + 1));
+    if (!p.empty() && p.back() == '\r') p.pop_back();
+    OPENSSL_cleanse(buf.data(), buf.size());
+    if (u.empty() || p.empty()) {
+        OPENSSL_cleanse(p.data(), p.size());
+        return false;
+    }
+    *username_out = std::move(u);
+    *password_out = std::move(p);
+    return true;
 }
 
 struct DisplayLayout0x451 {
@@ -2482,6 +2829,8 @@ struct SessionOptions {
     uint32_t logical_w = 1920;
     uint32_t logical_h = 1080;
     double hidpi_scale = 2.0;
+    int fps = 60;
+    bool audio_enabled = false;
     bool hdr = false;
     bool bake_cursor = true;
     bool warmup_tcp = true;
@@ -2692,11 +3041,36 @@ public:
     H264RtpAssembler &assembler() { return assembler_; }
     uint64_t video_rtp_packets() const { return video_rtp_pkts_; }
     uint64_t video_rtp_bytes() const { return video_rtp_bytes_; }
+    uint64_t audio_rtp_packets() const { return audio_rtp_pkts_; }
+
+    uint16_t logical_pointer_w() const {
+        return layout_.scaled_w ? layout_.scaled_w : server_w_;
+    }
+    uint16_t logical_pointer_h() const {
+        return layout_.scaled_h ? layout_.scaled_h : server_h_;
+    }
+
+    // Verifies RSA1/SRP-6a (or non-SRP) credentials against screensharingd without mounting
+    // a virtual display or starting UDP media streaming.
+    bool VerifyCredentials(const SessionOptions &opt, std::string *err_out) {
+        Close();
+        opt_ = opt;
+        if (!ResolveIpv4(opt.host, &dest_addr_, &dest_ip_)) {
+            if (err_out) *err_out = "cannot resolve host IPv4: " + opt.host;
+            return false;
+        }
+        std::array<uint8_t, 16> wrap_key{};
+        const bool ok = RunAuthWithFallback(opt, &wrap_key, err_out);
+        OPENSSL_cleanse(wrap_key.data(), wrap_key.size());
+        Close();
+        return ok;
+    }
 
     void Close() {
         if (tcp_fd_ >= 0) close(tcp_fd_), tcp_fd_ = -1;
         if (udp_ctrl_fd_ >= 0) close(udp_ctrl_fd_), udp_ctrl_fd_ = -1;
         if (udp_video_fd_ >= 0) close(udp_video_fd_), udp_video_fd_ = -1;
+        buttons_mask_ = 0;
     }
 
     bool Connect(const SessionOptions &opt, std::string *err_out) {
@@ -2785,7 +3159,8 @@ public:
         if (opt.settle_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(opt.settle_ms));
 
         if (opt.virtual_display &&
-            !SendAll(tcp_fd_, BuildVirtualDisplay0x1d(opt.logical_w, opt.logical_h, opt.hidpi_scale, opt.hdr))) {
+            !SendAll(tcp_fd_, BuildVirtualDisplay0x1d(opt.logical_w, opt.logical_h, opt.hidpi_scale, opt.hdr,
+                                                      "Frametop Virtual Display", double(opt.fps)))) {
             if (err_out) *err_out = "SetDisplayConfiguration (0x1d) send failed";
             Close();
             return false;
@@ -2814,7 +3189,8 @@ public:
         // Re-assert 0x1d virtual display over the encrypted channel once ScreensharingAgent's
         // Mach port is attached so cold-booted sessions mount SLVirtualDisplay before 0x1c.
         if (opt.virtual_display) {
-            if (!SendEncrypted(BuildVirtualDisplay0x1d(opt.logical_w, opt.logical_h, opt.hidpi_scale, opt.hdr))) {
+            if (!SendEncrypted(BuildVirtualDisplay0x1d(opt.logical_w, opt.logical_h, opt.hidpi_scale, opt.hdr,
+                                                       "Frametop Virtual Display", double(opt.fps)))) {
                 if (err_out) *err_out = "encrypted SetDisplayConfiguration (0x1d) send failed";
                 Close();
                 return false;
@@ -2827,7 +3203,7 @@ public:
         ocfg.codec = VideoCodec::kAvc;
         ocfg.tiles_per_frame = 1;
         ocfg.ltrp = false;
-        ocfg.audio_enabled = false;
+        ocfg.audio_enabled = opt.audio_enabled;
         if (!CreateNegotiatorOffers(ocfg, &offers_) || !NegotiationKeys::Generate(&keys_)) {
             if (err_out) *err_out = "failed to generate 0x1c media offers";
             Close();
@@ -2835,6 +3211,7 @@ public:
         }
         if (!video_rx_srtp_.InitFromBlob(keys_.video_key_s.data()) ||
             !video_tx_srtp_.InitFromBlob(keys_.video_key_v.data()) ||
+            !audio_rx_srtp_.InitFromBlob(keys_.audio_key_s.data()) ||
             !audio_tx_srtp_.InitFromBlob(keys_.audio_key_v.data())) {
             if (err_out) *err_out = "SRTP context initialization failed";
             Close();
@@ -2846,7 +3223,8 @@ public:
             Close();
             return false;
         }
-        const auto msg_1c = Build0x1cMessage(offers_.audio_bplist, offers_.video_bplist, keys_, opt.bake_cursor);
+        const auto msg_1c = Build0x1cMessage(offers_.audio_bplist, offers_.video_bplist, keys_, opt.bake_cursor,
+                                             opt.fps >= 45);
         if (!SendEncrypted(msg_1c)) {
             if (err_out) *err_out = "encrypted 0x1c send failed";
             Close();
@@ -2870,7 +3248,8 @@ public:
     // Non-blocking poll cycle: drains UDP video/ctrl, sends periodic SRTCP RR/SR + NACKs, drains TCP control.
     // Optional extra_poll_fd (e.g. V4L2 decoder fd) wakes poll() immediately when hardware decode completes.
     bool PollStep(int timeout_ms, std::vector<H264RtpAssembler::AccessUnit> *out_aus,
-                  std::string *err_out = nullptr, int extra_poll_fd = -1) {
+                  std::string *err_out = nullptr, int extra_poll_fd = -1,
+                  std::vector<std::vector<uint8_t>> *out_audio_aus = nullptr) {
         if (tcp_fd_ < 0 || udp_video_fd_ < 0) return false;
         pollfd pfds[4] = {
             {udp_video_fd_, POLLIN, 0},
@@ -2898,8 +3277,19 @@ public:
             }
         }
 
-        // 2. Drain UDP audio/ctrl socket so kernel recv buffer never overflows.
-        while (recv(udp_ctrl_fd_, udp_buf, sizeof udp_buf, 0) > 0) {
+        // 2. Drain UDP audio/ctrl socket (decrypting AAC-ELD packets when audio is active).
+        for (int n = 0; n < 256; ++n) {
+            const ssize_t r = recv(udp_ctrl_fd_, udp_buf, sizeof udp_buf, 0);
+            if (r <= 0) break;
+            if (!opt_.audio_enabled || !out_audio_aus || r < 12) continue;
+            const uint8_t pt_raw = udp_buf[1];
+            if (pt_raw >= 192 && pt_raw <= 223) continue;  // SRTCP from server
+            SrtpContext::RtpHeader hdr{};
+            std::vector<uint8_t> pay;
+            if (audio_rx_srtp_.DecryptRtp(udp_buf, size_t(r), &hdr, &pay) && !pay.empty()) {
+                ++audio_rtp_pkts_;
+                ParseRfc3640AuPayloads(pay.data(), pay.size(), out_audio_aus);
+            }
         }
 
         // 3. Promptly emit SRTCP NACKs when packet gaps occur.
@@ -2934,6 +3324,64 @@ public:
             SendVideoSrtcp(BuildFirLegacy(last_media_ssrc_));
             SendVideoSrtcp(BuildPli(offers_.video_ssrc, last_media_ssrc_));
         }
+    }
+
+    bool SendPointerMove(double stream_x, double stream_y, uint32_t stream_w, uint32_t stream_h) {
+        if (tcp_fd_ < 0) return false;
+        last_ptr_x_ = ScalePointerCoord(stream_x, stream_w, logical_pointer_w());
+        last_ptr_y_ = ScalePointerCoord(stream_y, stream_h, logical_pointer_h());
+        return SendEncrypted(BuildPointerEvent(buttons_mask_, last_ptr_x_, last_ptr_y_));
+    }
+
+    bool SendMouseButton(uint32_t linux_btn, bool down) {
+        if (tcp_fd_ < 0) return false;
+        const uint8_t bit = MouseButtonBit(linux_btn);
+        if (bit == 0) return true;
+        if (down) buttons_mask_ |= bit;
+        else buttons_mask_ = uint8_t(buttons_mask_ & ~bit);
+        return SendEncrypted(BuildPointerEvent(buttons_mask_, last_ptr_x_, last_ptr_y_));
+    }
+
+    // Wayland/ft-screens scroll convention: dy < 0 is scroll up, dy > 0 is scroll down;
+    // dx < 0 is scroll left, dx > 0 is scroll right.
+    bool SendMouseScroll(double dx, double dy) {
+        if (tcp_fd_ < 0) return false;
+        bool ok = true;
+        auto pulse_wheel = [&](double val, uint8_t neg_bit, uint8_t pos_bit) {
+            if (val == 0.0) return;
+            scroll_accum_y_ = 0.0;  // unused placeholder safe
+            const int ticks = std::clamp(int(std::lround(std::fabs(val))), 1, 12);
+            const uint8_t bit = (val < 0.0) ? neg_bit : pos_bit;
+            for (int t = 0; t < ticks; ++t) {
+                ok = SendEncrypted(BuildPointerEvent(uint8_t(buttons_mask_ | bit), last_ptr_x_, last_ptr_y_)) && ok;
+                ok = SendEncrypted(BuildPointerEvent(buttons_mask_, last_ptr_x_, last_ptr_y_)) && ok;
+            }
+        };
+        pulse_wheel(dy, 0x08, 0x10);  // RFB buttons 4 (up) / 5 (down)
+        pulse_wheel(dx, 0x20, 0x40);  // RFB buttons 6 (left) / 7 (right)
+        return ok;
+    }
+
+    bool SendEvdevKey(uint32_t evdev_code, bool down) {
+        if (tcp_fd_ < 0) return false;
+        bool ok = true;
+        key_mapper_.Process(evdev_code, down, [&](bool d, uint32_t ks) {
+            ok = SendEncrypted(BuildKeyEvent(d, ks)) && ok;
+        });
+        return ok;
+    }
+
+    bool SendInputBlur() {
+        if (tcp_fd_ < 0) return false;
+        bool ok = true;
+        key_mapper_.Blur([&](bool d, uint32_t ks) {
+            ok = SendEncrypted(BuildKeyEvent(d, ks)) && ok;
+        });
+        if (buttons_mask_ != 0) {
+            buttons_mask_ = 0;
+            ok = SendEncrypted(BuildPointerEvent(0, last_ptr_x_, last_ptr_y_)) && ok;
+        }
+        return ok;
     }
 
 private:
@@ -3321,14 +3769,21 @@ private:
     NegotiationKeys keys_{};
     SrtpContext video_rx_srtp_;
     SrtpContext video_tx_srtp_;
+    SrtpContext audio_rx_srtp_;
     SrtpContext audio_tx_srtp_;
     NegotiatedCanvas canvas_{};
     DisplayLayout0x451 layout_{};
     H264RtpAssembler assembler_;
+    EvdevKeyMapper key_mapper_;
+    uint8_t buttons_mask_ = 0;
+    uint16_t last_ptr_x_ = 0;
+    uint16_t last_ptr_y_ = 0;
+    double scroll_accum_y_ = 0.0;
     std::vector<uint8_t> tcp_rx_buf_;
     uint32_t last_media_ssrc_ = 0;
     uint64_t video_rtp_pkts_ = 0;
     uint64_t video_rtp_bytes_ = 0;
+    uint64_t audio_rtp_pkts_ = 0;
     int64_t last_tx_pulse_ns_ = 0;
     uint64_t pulse_tick_ = 0;
 };
