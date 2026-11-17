@@ -1,4 +1,4 @@
-# Personal fork: KWin 6.6 scaling and per-network streams
+# Personal fork: KWin 6.6 scaling, per-network streams and the slow-hands alert
 
 The `personal` branch is based on `kwin-6.6-output-scale` (`3b039d0`): upstream `experimental` (`fdfd96e`, the `v0.3.0` development line) plus the KWin 6.6 nested output scaling commit. Upstream remains [Frametop/frametop](https://github.com/Frametop/frametop); this fork is [LeeroyDing/frametop, branch personal](https://github.com/LeeroyDing/frametop/tree/personal).
 
@@ -28,6 +28,22 @@ A stream that goes through the host's own address with route `auto` keeps checki
 - `stream/route_settings.h`: a display's settings for a route, a host's route and direct addresses, and the two-in-a-row rule for switching; `stream/tests/route_settings_test.cpp` tests them (`scripts/test-route-settings.sh`).
 - `stream/ft-stream.cpp`: applies the settings once the route is chosen, before working out the default bitrate, and watches for a direct address while on the host's own (`WatchDirect`).
 - `layout/ft_layout.py`: `remote set ROUTE.fps=F ROUTE.bitrate=KBPS` and `remote list`; `layout/tests/test_remote_routes.py` tests them.
+
+## Slow-hands alert
+
+`hands/ft-camwatch` also watches for XRService's re-sync loop, the fault that leaves hand tracking slow after some system suspends until SteamVR restarts. Its notification has a Restart SteamVR button, and the desktop starts again after the restart. `hands/rendered-hands.md` ("The re-sync loop") has the rules and settings; `hands/tests/test_camwatch.py` tests them.
+
+Upstream ships the watcher's unit as a template that nothing installs. On the Frame, from the live release:
+
+```sh
+R=~/.local/share/frametop/releases/current
+sed "s|@REPO@|$(readlink -f $R)|g" $R/hands/frametop-camwatch.service > ~/.config/systemd/user/frametop-camwatch.service
+systemctl --user daemon-reload && systemctl --user enable --now frametop-camwatch.service
+journalctl --user -u frametop-camwatch -f      # what it sees and does
+$R/hands/ft-camwatch --notify-test             # the notification, its button doing nothing
+```
+
+The unit names a release folder, so write it again after a new release is installed.
 
 ## Finding ft-screens' tools
 

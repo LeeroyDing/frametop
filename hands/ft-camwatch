@@ -3,6 +3,14 @@
 headset's upper cameras and IR light (a VCINT FPGA load that fails, usually after a wake;
 hands/camcheck.py), tells the Frametop desktop, and can restart SteamVR by itself.
 
+It also watches for the re-sync loop: after some system suspends XRService logs "Set upper
+camera driver not in-sync" and then re-syncs the upper cameras without end (200 to 700 "Sync
+done fully" lines a minute, against 2 to 6 for a healthy wake). Each re-sync drops camera
+frames, so ft-camd gets 1 to 15 fps from cameras that give 30 and hand tracking is slow until
+SteamVR restarts. camcheck.py calls this "ok": all four cameras stay open. For this one the
+notification has a Restart SteamVR button, and it never restarts by itself: the loop only
+shows while the headset is worn.
+
 Off by default: hands/frametop-camwatch.service is a template the installer doesn't enable.
 Settings in ~/.config/frametop.conf:
   CAMWATCH_AUTO_RESTART=1    restart SteamVR on a failure (default 0: only a notification). Only
@@ -14,15 +22,21 @@ Settings in ~/.config/frametop.conf:
   CAMWATCH_COOLDOWN_MIN=30   the least time between two automatic restarts
   CAMWATCH_IGNORE_APPIDS=    Steam app ids that don't count as a running VR app (comma-separated)
   CAMWATCH_NOTIFY=1          post a notification in the Frametop desktop (0: log only)
+  CAMWATCH_SYNC_PER_MIN=100  the re-sync loop: this many re-syncs read within a minute (0: don't watch for it)
+  CAMWATCH_RENOTIFY_MIN=10   the re-sync loop: the least time between two of its notifications
+  CAMWATCH_RESTART_DESKTOP=1 after the notification's button restarted SteamVR, start the Frametop desktop
+                             again once SteamVR is up (0: start it yourself; AUTOSTART=1 does it anyway)
 
 A SteamVR restart also closes the Frametop desktop and every window in it (ft-screens quits
 with SteamVR, and the desktop's unit doesn't restart: see hands/README.md, "Camera check").
 
 It follows the log with a stat every 2 s (no inotify, nothing else while all is well), and
 logs every decision to stdout (the journal). --dry-run never notifies or restarts; --once
-prints the state and what it would do now, and exits.
+prints the state and what it would do now, and exits; --notify-test posts the re-sync loop's
+notification with a button that does nothing, to see how it shows in the headset.
 """
 import argparse
+import collections
 import json
 import os
 import subprocess
@@ -44,8 +58,18 @@ NOTIFY_TITLE = "Hand tracking: cameras off"
 NOTIFY_TEXT = ("The headset's upper cameras and IR light are off: SteamVR couldn't start the colour camera "
                "module (it happens sometimes after the headset sleeps). Restart SteamVR, or the headset if "
                "that doesn't fix it. Restarting SteamVR closes this desktop and its windows.")
+SYNC_LINE = "Sync done fully for cam"    # XRService, once per camera per re-sync
+SYNC_WINDOW_S = 60.0
+SYNC_TITLE = "Hand tracking is slow: cameras out of sync"
+SYNC_TEXT = ("SteamVR keeps re-syncing the headset's upper cameras and dropping camera frames (it can start "
+             "after the headset sleeps), so hand tracking gets only some of them. A SteamVR restart stops it. "
+             "That closes this desktop and its windows.")
+SYNC_TEXT_BACK = " The desktop starts again by itself."
+SYNC_ACTION, SYNC_BUTTON = "restart", "Restart SteamVR"
+NOTIFY_RETRY_S = 30.0   # with no desktop to notify, try again this much later
 DEFAULTS = {"CAMWATCH_AUTO_RESTART": "0", "CAMWATCH_IDLE_S": "60", "CAMWATCH_COOLDOWN_MIN": "30",
-            "CAMWATCH_IGNORE_APPIDS": "", "CAMWATCH_NOTIFY": "1", "VNC_PORT": "5900"}
+            "CAMWATCH_IGNORE_APPIDS": "", "CAMWATCH_NOTIFY": "1", "VNC_PORT": "5900",
+            "CAMWATCH_SYNC_PER_MIN": "100", "CAMWATCH_RENOTIFY_MIN": "10", "CAMWATCH_RESTART_DESKTOP": "1"}
 
 
 def log(text):
@@ -164,6 +188,57 @@ def restart_steamvr():
     return r.returncode == 0
 
 
+def notify_action(title, text, action, button):
+    """A notification with one button. Returns its notify-send process, which stays until the
+    notification is closed and prints the action's name if the button was pressed; None with no
+    Frametop desktop to show it in."""
+    bus = frametop_bus()
+    if not bus:
+        return None
+    try:
+        return subprocess.Popen(["notify-send", "-a", "Frametop", "-u", "critical", "-i", "dialog-warning",
+                                 "-A", "%s=%s" % (action, button), title, text],
+                                env=dict(os.environ, DBUS_SESSION_BUS_ADDRESS=bus), stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, text=True)
+    except OSError as e:
+        log("notify-send failed: %s" % e)
+        return None
+
+
+def note_pressed(note):
+    """None while the notification is up; then whether its button was pressed (False: closed)."""
+    if note.poll() is None:
+        return None
+    try:
+        out = note.stdout.read()
+    except (OSError, ValueError):
+        out = ""
+    return SYNC_ACTION in out.split()
+
+
+def drop_note(note):
+    """Ends a notification's notify-send (the notification itself stays up; its button then does nothing)."""
+    try:
+        note.terminate()
+        note.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def start_desktop():
+    """desktops.sh start, in a unit of its own (this service's CPU and memory limits aren't for it)."""
+    script = os.path.join(os.path.dirname(HERE), "desktops.sh")
+    r = subprocess.run(["systemd-run", "--user", "--collect", "--quiet", "--unit", "frametop-camwatch-desktop",
+                        script, "start"], capture_output=True, text=True, timeout=30)
+    log("starting the Frametop desktop again (%s start): exit %d %s" % (script, r.returncode, (r.stderr or "").strip()))
+    return r.returncode == 0
+
+
+def sync_text(conf):
+    back = conf.get("CAMWATCH_RESTART_DESKTOP", "1") != "0" or conf.get("AUTOSTART") == "1"
+    return SYNC_TEXT + (SYNC_TEXT_BACK if back else "")
+
+
 def environment(conf):
     ignore = tuple(a.strip() for a in conf.get("CAMWATCH_IGNORE_APPIDS", "").replace(",", " ").split() if a.strip())
     return {"steamvr": camcheck.xrservice_pid() is not None, "worn": headset_worn(),
@@ -174,7 +249,8 @@ def environment(conf):
 # The decision (pure: tests feed it made-up states)
 
 def new_memory():
-    return {"pending": "", "notified": [], "restarted": {}, "last_restart": 0.0, "idle_since": None, "why": ""}
+    return {"pending": "", "notified": [], "restarted": {}, "last_restart": 0.0, "idle_since": None, "why": "",
+            "sync_since": None, "sync_notified": 0.0}
 
 
 def decide(now, failure, env, mem, conf):
@@ -232,6 +308,53 @@ def decide(now, failure, env, mem, conf):
     return acts
 
 
+def decide_sync(now, rate, note_up, mem, conf):
+    """The re-sync loop's part. rate: SyncLoop.rate(), the re-syncs read in the last minute;
+    note_up: its notification is still showing; mem: new_memory(), updated in place; now:
+    wall-clock seconds. It begins at CAMWATCH_SYNC_PER_MIN and ends under a quarter of that, so
+    a loop that slows doesn't come and go. Returns [("log", text) | ("notify_sync", rate)]: a
+    notification when it begins, and again while it lasts once the last one was closed and
+    CAMWATCH_RENOTIFY_MIN has passed. Never a restart: that's the notification's button."""
+    acts = []
+    limit = conf_int(conf, "CAMWATCH_SYNC_PER_MIN")
+    looping = limit > 0 and (rate >= limit or (mem["sync_since"] is not None and rate * 4 >= limit))
+    if not looping:
+        if mem["sync_since"] is not None:
+            acts.append(("log", "the upper cameras' re-sync loop stopped (%d re-syncs in the last minute)" % rate))
+        mem["sync_since"] = None
+        return acts
+    if mem["sync_since"] is None:
+        mem["sync_since"] = now
+        acts.append(("log", "the upper cameras are re-syncing in a loop: %d re-syncs in the last minute, so the "
+                            "cameras drop frames and hand tracking is slow until SteamVR restarts" % rate))
+    if (conf.get("CAMWATCH_NOTIFY", "1") != "0" and not note_up
+            and now - mem["sync_notified"] >= conf_int(conf, "CAMWATCH_RENOTIFY_MIN") * 60):
+        mem["sync_notified"] = now
+        acts.append(("notify_sync", rate))
+    return acts
+
+
+class Relaunch:
+    """After the button's SteamVR restart: when to start the Frametop desktop again. Once a new
+    XRService, vrserver and vrcompositor all run, and still do settle_s later (the dashboard and
+    its drivers come up just after the compositor: session/autostart.sh waits the same way)."""
+
+    def __init__(self, old_pid, now, wait_s=180.0, settle_s=5.0):
+        self.old_pid, self.deadline, self.settle_s, self.up_since = old_pid, now + wait_s, settle_s, None
+
+    def step(self, now, xr_pid, up):
+        """"wait", "start" or "gave up". xr_pid: XRService's pid now (None: not running);
+        up: vrserver and vrcompositor run; now: monotonic seconds."""
+        if xr_pid is not None and xr_pid != self.old_pid and up:
+            if self.up_since is None:
+                self.up_since = now
+            if now - self.up_since >= self.settle_s:
+                return "start"
+        else:
+            self.up_since = None
+        return "gave up" if now > self.deadline else "wait"
+
+
 def load_memory(path=STATE):
     mem = new_memory()
     try:
@@ -257,13 +380,35 @@ def save_memory(mem, path=STATE):
 # ------------------------------------------------------------------------------------------
 # Following the log
 
-class Follower:
-    """The running XRService's log, read as it grows. A new log (SteamVR restarted) starts afresh."""
+class SyncLoop:
+    """XRService's camera re-syncs over the last SYNC_WINDOW_S, timed by when they were read
+    (the log's own clock isn't trusted)."""
 
-    def __init__(self, path=None):
+    def __init__(self):
+        self.seen = collections.deque()    # (monotonic seconds, lines)
+
+    def add(self, now, lines):
+        if lines > 0:
+            self.seen.append((now, lines))
+
+    def rate(self, now):
+        while self.seen and now - self.seen[0][0] > SYNC_WINDOW_S:
+            self.seen.popleft()
+        return sum(n for _, n in self.seen)
+
+
+class Follower:
+    """The running XRService's log, read as it grows. A new log (SteamVR restarted) starts afresh.
+    It also counts the re-syncs it reads (SyncLoop), but only once it has caught up with the log:
+    what a log already held when it was first opened says nothing about now."""
+
+    def __init__(self, path=None, clock=time.monotonic):
         self.fixed = path
         self.path, self.ino, self.offset, self.rest = "", None, 0, ""
         self.state = None
+        self.clock = clock
+        self.sync = SyncLoop()
+        self.caught_up = False
 
     def poll(self):
         path = self.fixed or camcheck.newest_log()
@@ -276,6 +421,7 @@ class Follower:
         if path != self.path or st.st_ino != self.ino or st.st_size < self.offset:
             self.path, self.ino, self.offset, self.rest = path, st.st_ino, 0, ""
             self.state = camcheck.LogState(path)
+            self.sync, self.caught_up = SyncLoop(), False
             log("following %s" % path)
         if st.st_size > self.offset:
             with open(path, "rb") as f:
@@ -285,9 +431,18 @@ class Follower:
             text = self.rest + data.decode(errors="replace")
             lines = text.split("\n")
             self.rest = lines.pop()
+            syncs = 0
             for line in lines:
                 self.state.feed(line)
+                syncs += SYNC_LINE in line
+            if self.caught_up:
+                self.sync.add(self.clock(), syncs)
+        if self.offset >= st.st_size:
+            self.caught_up = True
         return self.state
+
+    def sync_rate(self):
+        return self.sync.rate(self.clock())
 
 
 def current_failure(state, steamvr_running=True):
@@ -318,19 +473,120 @@ def act(acts, dry):
     return changed
 
 
+def steamvr_up():
+    return process_running("vrserver") and process_running("vrcompositor")
+
+
+class SyncAlert:
+    """The re-sync loop's notification, its button and the desktop's return: what main does about
+    them each poll. Everything it does to the system goes through `do`, so tests can stand in."""
+
+    def __init__(self, dry=False, do=None):
+        self.dry = dry
+        self.do = {"post": lambda conf: notify_action(SYNC_TITLE, sync_text(conf), SYNC_ACTION, SYNC_BUTTON),
+                   "pressed": note_pressed, "drop": drop_note, "restart": restart_steamvr,
+                   "desktop": start_desktop, "xr_pid": camcheck.xrservice_pid, "up": steamvr_up,
+                   "has_desktop": lambda: frametop_bus() is not None}
+        self.do.update(do or {})
+        self.note, self.note_log = None, ""    # the notification showing, and the log it was about
+        self.relaunch = None
+        self.last_log = ""
+        self.quiet = ""                        # why no notification went out, said once
+
+    def say(self, text):
+        if text != self.quiet:
+            self.quiet = text
+            log(text)
+
+    def press(self, mono, conf):
+        pid = self.do["xr_pid"]()
+        back = (conf.get("CAMWATCH_RESTART_DESKTOP", "1") != "0" and conf.get("AUTOSTART") != "1"
+                and self.do["has_desktop"]())
+        log("the notification's %s button was pressed: restarting SteamVR%s"
+            % (SYNC_BUTTON, "; the desktop starts again once it's up" if back else ""))
+        if self.do["restart"]() and back:
+            self.relaunch = Relaunch(pid, mono)
+
+    def step(self, wall, mono, rate, log_path, mem, conf):
+        """wall, mono: wall-clock and monotonic seconds; rate: Follower.sync_rate(); log_path: the
+        log followed (a new one means SteamVR restarted)."""
+        if log_path != self.last_log:
+            self.last_log = log_path
+            mem["sync_notified"] = 0.0         # a new SteamVR: a new loop gets its notification at once
+        if self.note is not None:
+            if log_path != self.note_log:
+                # The loop it was about went with that SteamVR: its button mustn't restart this one.
+                self.do["drop"](self.note)
+                self.note = None
+            else:
+                pressed = self.do["pressed"](self.note)
+                if pressed is not None:
+                    self.note = None
+                    if pressed:
+                        self.press(mono, conf)
+                    else:
+                        log("the re-sync notification was closed without its button")
+        if self.relaunch is not None:
+            what = self.relaunch.step(mono, self.do["xr_pid"](), self.do["up"]())
+            if what == "start":
+                self.relaunch = None
+                self.do["desktop"]()
+            elif what == "gave up":
+                self.relaunch = None
+                log("SteamVR didn't come up within 3 minutes: start the desktop from the library")
+        for kind, arg in decide_sync(wall, rate, self.note is not None, mem, conf):
+            if kind == "log":
+                log(arg)
+            elif self.dry:
+                log("(dry run) would notify: %s" % SYNC_TITLE)
+            else:
+                self.note, self.note_log = self.do["post"](conf), log_path
+                if self.note is None:
+                    mem["sync_notified"] = wall - conf_int(conf, "CAMWATCH_RENOTIFY_MIN") * 60 + NOTIFY_RETRY_S
+                    self.say("no Frametop desktop to notify (trying every %d s while the loop lasts)" % NOTIFY_RETRY_S)
+                else:
+                    self.quiet = ""
+                    log("notified: %s" % SYNC_TITLE)
+
+
+def notify_test(conf):
+    """--notify-test: the re-sync loop's notification as it would show, its button doing nothing."""
+    note = notify_action(SYNC_TITLE, "(Only a test: the button does nothing.) " + sync_text(conf),
+                         SYNC_ACTION, SYNC_BUTTON)
+    if note is None:
+        log("no Frametop desktop running: no notification")
+        return 1
+    log("posted; waiting for its button, or for it to be closed")
+    while True:
+        pressed = note_pressed(note)
+        if pressed is not None:
+            break
+        time.sleep(0.5)
+    log("the button was pressed (a test: nothing restarts)" if pressed else "closed without the button")
+    return 0
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Watch for the camera failure that turns off the upper cameras.")
+    ap = argparse.ArgumentParser(description="Watch for the camera failure that turns off the upper cameras, "
+                                             "and for the re-sync loop that slows hand tracking.")
     ap.add_argument("--dry-run", action="store_true", help="log what it would do; never notify or restart")
     ap.add_argument("--once", action="store_true", help="look once, print the decision (a dry run), and exit")
     ap.add_argument("--log", help="follow this file instead of the running XRService's log (tests)")
     ap.add_argument("--state", default=STATE, help="where it remembers past failures (default %(default)s)")
+    ap.add_argument("--notify-test", action="store_true",
+                    help="post the re-sync loop's notification with a button that does nothing, and say what "
+                         "happened to it")
     a = ap.parse_args(argv)
+    if a.notify_test:
+        return notify_test(read_conf())
     dry = a.dry_run or a.once
     mem = load_memory(a.state)
     follower = Follower(a.log)
     conf = read_conf()
     conf_mtime = 0.0
-    log("watching; automatic restart %s" % ("on" if conf.get("CAMWATCH_AUTO_RESTART") == "1" else "off"))
+    alert = SyncAlert(dry)
+    log("watching; automatic restart %s; the re-sync loop at %d re-syncs a minute"
+        % ("on" if conf.get("CAMWATCH_AUTO_RESTART") == "1" else "off", conf_int(conf, "CAMWATCH_SYNC_PER_MIN")))
     while True:
         try:
             m = os.stat(CONF).st_mtime
@@ -351,9 +607,11 @@ def main(argv=None):
             print("log: %s\nstate: %s %s\nenvironment: %s" % (follower.path, snap["status"], snap["reason"],
                                                               json.dumps(env)))
             act(acts, True)
+            print("re-sync loop: not told by one look (it counts the re-syncs logged while it watches)")
             return 0
         if act(acts, dry) and not dry:
             save_memory(mem, a.state)
+        alert.step(time.time(), time.monotonic(), follower.sync_rate(), follower.path, mem, conf)
         time.sleep(POLL_S)
 
 
