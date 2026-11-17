@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
+#include <numeric>
 #include <sstream>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,7 +38,106 @@ int Side::settled() const {
 bool Profile::empty() const {
     for (const Side &s : side)
         if (s.scale.n > 0 || s.settled() > 0) return false;
+    for (const auto &[cam, stats] : tiles)
+        for (const TileStat &t : stats)
+            if (t.tries > 0 || t.finds > 0) return false;
+    for (const PinchStat &s : pinch)
+        if (s.tap_n() > 0 || s.idle_n() > 0) return false;
     return true;
+}
+
+double PinchStat::tap_n() const { return std::accumulate(taps, taps + kPinchBins, 0.0); }
+double PinchStat::idle_n() const { return std::accumulate(idle, idle + kPinchBins, 0.0); }
+void PinchStat::add(const PinchStat &o) {
+    for (int b = 0; b < kPinchBins; ++b) taps[b] += o.taps[b], idle[b] += o.idle[b];
+}
+
+double quantile(const double bins[kPinchBins], double q) {
+    const double total = std::accumulate(bins, bins + kPinchBins, 0.0);
+    if (!(total > 0)) return -1;
+    double below = 0;
+    for (int b = 0; b < kPinchBins; ++b) {
+        below += bins[b];
+        if (below >= q * total) return (b + 1) * 0.001;   // the bin's upper edge: everything in it is under that
+    }
+    return kPinchBins * 0.001;
+}
+
+PinchLearned learned_pinch(const PinchStat &s, double begin_m, double dip_max_m) {
+    PinchLearned out{begin_m, dip_max_m};
+    if (s.tap_n() < kPinchMinTaps) return out;
+    out.dip_max_m = std::min(dip_max_m, std::max(kDipMaxFloor, quantile(s.taps, 0.97) + 0.003));
+    if (s.idle_n() >= kPinchMinIdle) {
+        const double wanted = quantile(s.taps, 0.80) + 0.002, safe = quantile(s.idle, 0.01) - 0.003;
+        out.begin_m = std::clamp(std::min(wanted, safe), begin_m, begin_m + kBeginRise);
+    }
+    // the dip rule is for dips that don't reach begin_m: keep some room for it over begin_m
+    out.dip_max_m = std::max(out.dip_max_m, std::min(dip_max_m, out.begin_m + 0.002));
+    return out;
+}
+
+namespace {
+int bin_of(double metres) { return std::clamp(int(metres * 1000), 0, kPinchBins - 1); }
+void halve_past(double *bins, double limit) {
+    if (std::accumulate(bins, bins + kPinchBins, 0.0) > limit)
+        for (int b = 0; b < kPinchBins; ++b) bins[b] *= 0.5;
+}
+}  // namespace
+
+void PinchObserver::update(int s, int64_t t_ns, double d, bool down, bool began, bool ended, bool lost) {
+    if (s < 0 || s > 1) return;
+    const int64_t clear = int64_t(kPinchClear * 1e9);
+    if (began) {
+        pending_[s].clear();   // those were the fingers closing, not a hand at rest
+        low_[s] = d >= 0 ? d : 1;
+    }
+    if (down && d >= 0) low_[s] = std::min(low_[s], d);
+    if (ended || lost) {
+        if (ended && !lost && low_[s] < 1) {
+            stat[s].taps[bin_of(low_[s])] += 1;
+            halve_past(stat[s].taps, kTapsForget);
+        }
+        low_[s] = 1;
+        quiet_until_[s] = t_ns + clear;   // nor the fingers opening again
+        pending_[s].clear();
+    }
+    if (d < 0) {
+        pending_[s].clear();   // the hand went: what it was doing just before isn't known
+        return;
+    }
+    while (!pending_[s].empty() && t_ns - pending_[s].front().first >= clear) {
+        stat[s].idle[bin_of(pending_[s].front().second)] += 1;
+        pending_[s].pop_front();
+        halve_past(stat[s].idle, kIdleForget);
+    }
+    // a little under kIdleEvery will do: at 30 sets a second, three sets are 99.99 ms
+    if (!down && !began && !ended && !lost && t_ns >= quiet_until_[s] &&
+        t_ns - last_idle_[s] >= int64_t(kIdleEvery * 1e9) - 5'000'000) {
+        pending_[s].push_back({t_ns, d});
+        last_idle_[s] = t_ns;
+    }
+}
+
+double mean_rate(const std::map<std::string, std::vector<TileStat>> &tiles) {
+    double tries = 0, finds = 0;
+    for (const auto &[cam, stats] : tiles)
+        for (const TileStat &t : stats) tries += t.tries, finds += t.finds;
+    return tries > 0 ? finds / tries : 0;
+}
+
+double tile_boost(const TileStat &t, double mean_rate) {
+    if (!(mean_rate > 0)) return 1;   // nothing found anywhere yet: nothing to go by
+    const double rate = (t.finds + kTilePrior * mean_rate) / (t.tries + kTilePrior);
+    return std::clamp(rate / mean_rate, kTileBoostMin, kTileBoostMax);
+}
+
+void forget_old(std::map<std::string, std::vector<TileStat>> &tiles) {
+    double tries = 0;
+    for (const auto &[cam, stats] : tiles)
+        for (const TileStat &t : stats) tries += t.tries;
+    if (tries <= kTileForget) return;
+    for (auto &[cam, stats] : tiles)
+        for (TileStat &t : stats) t.tries *= 0.5, t.finds *= 0.5;
 }
 
 // The first 15 quantities are five palm points' coordinates (the knuckles and the thumb's base,
@@ -76,6 +176,28 @@ std::string text(const Profile &p) {
         for (int k = 0; k < skel::kQuantities; ++k) out += " " + std::to_string(side.n[k]);
         out += "\n";
     }
+    for (const auto &[cam, stats] : p.tiles) {
+        bool any = false;
+        for (const TileStat &t : stats) any = any || t.tries > 0 || t.finds > 0;
+        if (!any || cam.empty() || cam.find_first_of(" \t\n#") != std::string::npos) continue;
+        out += "tiles " + cam + " " + std::to_string(stats.size());
+        for (const TileStat &t : stats) {
+            std::snprintf(buf, sizeof buf, " %.6g %.6g", t.tries, t.finds);
+            out += buf;
+        }
+        out += "\n";
+    }
+    for (int s = 0; s < 2; ++s)
+        for (const bool taps : {true, false}) {
+            const double *bins = taps ? p.pinch[s].taps : p.pinch[s].idle;
+            if (!(std::accumulate(bins, bins + kPinchBins, 0.0) > 0)) continue;
+            out += std::string(taps ? "taps " : "idle ") + kSideName[s];
+            for (int b = 0; b < kPinchBins; ++b) {
+                std::snprintf(buf, sizeof buf, " %.6g", bins[b]);
+                out += buf;
+            }
+            out += "\n";
+        }
     return out;
 }
 
@@ -93,6 +215,19 @@ int parse(const std::string &text, Profile &out) {
             continue;
         }
         if (format != 1 || !(words >> which)) continue;
+        if (key == "tiles") {   // `which` is the camera
+            size_t count = 0;
+            if (!(words >> count) || count == 0 || count > 256) continue;
+            std::vector<TileStat> stats(count);
+            bool ok = true;
+            for (TileStat &t : stats)
+                ok = ok && bool(words >> t.tries >> t.finds) && std::isfinite(t.tries) && std::isfinite(t.finds) &&
+                     t.finds >= 0 && t.tries >= t.finds;   // a find is a try that found a hand
+            if (!ok) continue;
+            out.tiles[which] = stats;
+            ++kept;
+            continue;
+        }
         const int s = side_of(which);
         if (s < 0) continue;
         if (key == "scale") {
@@ -108,6 +243,13 @@ int parse(const std::string &text, Profile &out) {
             if (!ok) continue;
             std::copy(q, q + skel::kQuantities, out.side[s].q);
             have_shape[s] = true;
+            ++kept;
+        } else if (key == "taps" || key == "idle") {
+            double bins[kPinchBins];
+            bool ok = true;
+            for (int b = 0; b < kPinchBins && ok; ++b) ok = bool(words >> bins[b]) && std::isfinite(bins[b]) && bins[b] >= 0;
+            if (!ok) continue;
+            std::copy(bins, bins + kPinchBins, key == "taps" ? out.side_pinch(s).taps : out.side_pinch(s).idle);
             ++kept;
         } else if (key == "count") {
             long n[skel::kQuantities];

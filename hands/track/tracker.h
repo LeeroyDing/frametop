@@ -152,6 +152,14 @@ public:
     void seed_user_scale(int side, const profile::Running &r) { user_scale_[side > 0] = r; }
     const profile::Running &user_scale(int side) const { return user_scale_[side > 0]; }
     double start_scale() const;   // a new hand's: the settled sides' mean (its side isn't known yet), else 1
+    // Where the palm search finds this wearer's hands (profile::TileStat). When on, the rotation
+    // counts each tile it tries with no tracked hand in it, and each hand that turns up there, and
+    // gives a tile credit by its fixed weight times profile::tile_boost: the tiles the wearer's hands
+    // come into view in come round up to 4 times as often, the others at least half as often. Off by
+    // default, so old replays repeat. Counts are per camera, in the tiles' order.
+    void set_tile_learning(bool on) { tile_learning_ = on; }
+    std::map<std::string, std::vector<profile::TileStat>> tile_stats() const;
+    void seed_tile_stats(const std::map<std::string, std::vector<profile::TileStat>> &stats);
     // One view's 3D hand: each landmark along its ray, as far as how big the palm looks says
     // for a hand `scale` times the model's (Hand::scale). False if the palm is degenerate.
     static bool single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]);
@@ -213,6 +221,8 @@ private:
     skel::Skeleton skel_;
     bool user_scale_on_ = false;
     profile::Running user_scale_[2];   // left, right
+    bool tile_learning_ = false;
+    std::vector<profile::TileStat> tile_stats_;   // one per tile, as tiles_
     std::vector<View> views_;
     std::map<int, Hand> hands_;
     std::vector<Tile> tiles_;

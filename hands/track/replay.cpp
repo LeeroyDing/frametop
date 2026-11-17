@@ -355,6 +355,7 @@ int main(int argc, char **argv) {
     // this replay learned. A replay into a file and a second one from it are the before and after.
     if (!profile_in.empty() || !profile_out.empty()) {
         tracker.set_user_scale(true);
+        tracker.set_tile_learning(true);
         if (!profile_in.empty()) {
             profile::Profile prof;
             std::string perr;
@@ -366,6 +367,7 @@ int main(int argc, char **argv) {
                 std::printf("hand profile: %s size %.2f (%ld frames), shape %d/%d settled\n", s ? "right" : "left ",
                             prof.side[s].scale.value, prof.side[s].scale.n, prof.side[s].settled(), skel::kQuantities);
             }
+            tracker.seed_tile_stats(prof.tiles);
         }
     }
     skeval::Eval eval;
@@ -915,12 +917,30 @@ int main(int argc, char **argv) {
                     "starts at %.3f\n",
                     tracker.user_scale(0).value, tracker.user_scale(0).n, tracker.user_scale(1).value, tracker.user_scale(1).n,
                     tracker.start_scale());
+    if (!profile_in.empty() || !profile_out.empty()) {
+        // the search's tiles, most boosted first: where this wearer's hands turned up
+        const auto tiles = tracker.tile_stats();
+        const double mean = profile::mean_rate(tiles);
+        std::vector<std::pair<double, std::string>> rows;
+        for (const auto &[cam, stats] : tiles)
+            for (size_t k = 0; k < stats.size(); ++k) {
+                char buf[120];
+                std::snprintf(buf, sizeof buf, "%s#%zu %.0f/%.0f x%.2f", cam.c_str(), k, stats[k].finds, stats[k].tries,
+                              profile::tile_boost(stats[k], mean));
+                rows.push_back({-profile::tile_boost(stats[k], mean), buf});
+            }
+        std::sort(rows.begin(), rows.end());
+        std::printf("hand profile: the search's tiles (finds/tries, weight), %.3f finds a try over all:", mean);
+        for (size_t k = 0; k < rows.size() && k < 8; ++k) std::printf("  %s", rows[k].second.c_str());
+        std::printf("\n");
+    }
     if (!profile_out.empty()) {
         profile::Profile prof;
         for (int s = 0; s < 2; ++s) {
             tracker.skeleton().calibration(s).quantities(prof.side[s].q, prof.side[s].n);
             prof.side[s].scale = tracker.user_scale(s);
         }
+        prof.tiles = tracker.tile_stats();
         std::string perr;
         if (!profile::save(profile_out, prof, perr)) return std::fprintf(stderr, "--profile-out: %s\n", perr.c_str()), 1;
         std::printf("hand profile: written to %s\n", profile_out.c_str());

@@ -173,6 +173,26 @@ std::vector<std::string> Tracker::describe_tiles() const {
     return out;
 }
 
+std::map<std::string, std::vector<profile::TileStat>> Tracker::tile_stats() const {
+    std::map<std::string, std::vector<profile::TileStat>> out;
+    for (size_t i = 0; i < tiles_.size(); ++i)
+        out[tiles_[i].cam->name].push_back(i < tile_stats_.size() ? tile_stats_[i] : profile::TileStat{});
+    return out;
+}
+
+// A camera whose tiles aren't as many as the record has (another tile layout) starts afresh.
+void Tracker::seed_tile_stats(const std::map<std::string, std::vector<profile::TileStat>> &stats) {
+    tile_stats_.assign(tiles_.size(), {});
+    std::map<std::string, size_t> count, next;
+    for (const Tile &t : tiles_) ++count[t.cam->name];
+    for (size_t i = 0; i < tiles_.size(); ++i) {
+        const std::string &cam = tiles_[i].cam->name;
+        const auto it = stats.find(cam);
+        const size_t k = next[cam]++;
+        if (it != stats.end() && it->second.size() == count[cam]) tile_stats_[i] = it->second[k];
+    }
+}
+
 double Tracker::start_scale() const {
     if (!user_scale_on_) return 1.0;
     double sum = 0;
@@ -607,9 +627,20 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
         // aimed tiles share the budget, but the rotation keeps at least one tile (unless it's not due:
         // with every_step, aimed tiles go up between the rotation's rounds)
         const int rotation = rotation_due ? std::max(1, budget - int(aimed.size())) : 0;
-        if (rotation_due)
-            for (Tile &t : tiles_)
-                if (images.count(t.cam->name)) t.credit += t.weight;
+        if (tile_learning_ && tile_stats_.size() != tiles_.size()) tile_stats_.assign(tiles_.size(), {});
+        if (rotation_due) {
+            // each tile's credit grows by its weight; with tile learning, more where hands turn up
+            double mean = 0;
+            if (tile_learning_) {
+                double tries = 0, finds = 0;
+                for (const profile::TileStat &s : tile_stats_) tries += s.tries, finds += s.finds;
+                mean = tries > 0 ? finds / tries : 0;
+            }
+            for (size_t i = 0; i < tiles_.size(); ++i) {
+                Tile &t = tiles_[i];
+                if (images.count(t.cam->name)) t.credit += t.weight * (tile_learning_ ? profile::tile_boost(tile_stats_[i], mean) : 1.0);
+            }
+        }
         for (int b = 0; b < rotation; ++b) {
             Tile *best = nullptr;
             for (Tile &t : tiles_)
@@ -619,6 +650,15 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
             if (!best) break;
             best->credit = 0;
             picked.push_back(best);
+            if (tile_learning_) {
+                // a try, unless a tracked hand is in the tile: its palm is skipped as that hand's, which
+                // says nothing about whether hands turn up here
+                bool occupied = false;
+                for (const View &v : views_)
+                    occupied = occupied || (v.cam == best->cam && std::fabs(v.roi.center[0] - best->center[0]) < best->size / 2 &&
+                                            std::fabs(v.roi.center[1] - best->center[1]) < best->size / 2);
+                if (!occupied) tile_stats_[size_t(best - tiles_.data())].tries += 1;
+            }
         }
         if (!picked.empty()) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -634,6 +674,7 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
             stats.palm_ms += ms_since(t0);
             ++stats.palm_batches;
             std::vector<View> fresh;
+            std::vector<int> fresh_tile;   // the rotation's tile each came from (-1: one aimed at a lost hand)
             std::string tl;
             if (trace_)
                 for (Tile *t : picked)
@@ -648,7 +689,11 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
                         for (View &v : *list)
                             near = near || (v.cam == picked[i]->cam && norm(v.roi.center - roi.center) < near_frac_ * roi.size);
                     ++nfound, nnear += near;
-                    if (!near) fresh.push_back({picked[i]->cam, roi, 0, {}, false, 0});
+                    if (!near) {
+                        fresh.push_back({picked[i]->cam, roi, 0, {}, false, 0});
+                        const Tile *t = picked[i];
+                        fresh_tile.push_back(t >= tiles_.data() && t < tiles_.data() + tiles_.size() ? int(t - tiles_.data()) : -1);
+                    }
                 }
             note("search tracked %zu tiles%s palms %d near-tracked %d", tracked.size(), tl.c_str(), nfound, nnear);
             std::vector<View *> ptrs;
@@ -656,7 +701,9 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
             run_landmarks(images, ptrs);
             for (View &v : fresh)
                 if (blinded(v)) v.lm.presence = 0;
-            for (View &v : fresh) {
+            std::vector<bool> tile_found(tiles_.size(), false);   // a tile finds one hand a search at most
+            for (size_t fi = 0; fi < fresh.size(); ++fi) {
+                View &v = fresh[fi];
                 // a palm crop on a hand already tracked in this camera (with set_near under 0.5, palms
                 // right beside a tracked hand get tried). Stricter than same_hand: a hand beside it has its
                 // palm about half a hand length away.
@@ -677,6 +724,12 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
                     v.roi = v.lm.next_roi();
                     v.frames = 1;
                     views_.push_back(v);
+                    if (tile_learning_ && fresh_tile[fi] >= 0 && !tile_found[size_t(fresh_tile[fi])]) {
+                        tile_found[size_t(fresh_tile[fi])] = true;
+                        profile::TileStat &s = tile_stats_[size_t(fresh_tile[fi])];
+                        s.finds += 1;
+                        s.tries = std::max(s.tries, s.finds);   // found beside a tracked hand: that try wasn't counted
+                    }
                 }
             }
         }
