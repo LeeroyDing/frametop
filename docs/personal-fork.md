@@ -34,8 +34,8 @@ A stream that goes through the host's own address with route `auto` keeps checki
 An Apple Silicon Mac with Screen Sharing or Remote Management turned on (`screensharingd`, TCP and UDP port 5900) can stream directly to Frametop without Sunshine or Vibepollo. `stream/ft-appless.cpp` speaks Apple's High Performance Screen Sharing session (RFB 3.889 RSA1/SRP-6a Type 36 authentication, `enc1103` AES-128-CBC control channel, and `AVConference` H.264 + AAC-ELD 48 kHz stereo SRTP over UDP 5900), rewrites `pic_order_cnt_type` 0 to 2 before feeding `qcom-iris` (`/dev/video-dec0`) for zero-frame DPB hold, converts full-range BT.709 `Q08C` UBWC into `ft-screens`'s three-buffer RGBA UBWC ring, forwards scaled pointer, scroll, and keyboard input, and plays host audio through `libfdk-aac` and `libpulse-simple`.
 
 ```sh
-layout/ft-layout remote auth 192.168.1.178 --login   # macOS user<TAB>password on stdin -> 0600 ~/.local/share/frametop-stream/hosts/192.168.1.178.apple
-layout/ft-layout remote add 192.168.1.178 apple:virtual --host Space-Odysseus --name "Space-Odysseus: Virtual"
+layout/ft-layout remote auth Space-Odysseus.local --login   # macOS user<NL>password on stdin -> 0600 ~/.local/share/frametop-stream/hosts/Space-Odysseus.local.apple
+layout/ft-layout remote add Space-Odysseus Space-Odysseus.local apple:virtual --label "Space-Odysseus: Virtual"
 layout/ft-layout remote host Space-Odysseus direct=192.168.1.143 route=auto
 ```
 
