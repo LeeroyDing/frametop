@@ -55,6 +55,10 @@ public:
     Shape shape(const Shape &prior) const;
     double settled() const;   // 0..1: the least-sampled quantity's share of kSettle
     int samples(int k) const { return n_[k]; }
+    // An earlier run's estimates (track/profile.h): each quantity with kSettle samples or more
+    // starts there, settled, and goes on following its samples; the rest are learned as before.
+    void seed(const double q[kQuantities], const int n[kQuantities]);
+    void quantities(double q[kQuantities], int n[kQuantities]) const;   // the estimates and their samples
 
 private:
     std::vector<float> buf_[kQuantities];
@@ -115,6 +119,7 @@ public:
     // The head's up direction, for the arm model (default: the head frame's +y).
     void set_up(V3 up) { up_ = unit(up); }
     const Calibration &calibration(int side) const { return cal_[side > 0]; }
+    Calibration &calibration(int side) { return cal_[side > 0]; }   // to seed it from a profile
     Shape shape(int side, double scale) const;   // the side's current estimate
     static Shape canonical(double scale);        // the model's average hand, times scale
     const Params &params() const { return p_; }

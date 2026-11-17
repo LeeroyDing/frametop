@@ -53,6 +53,10 @@
 //             default) the report ends with the skeleton's measures (track/skeval.h): fit time
 //             and residual, the bone-length calibration, bone-length spread, jitter, fingertip
 //             lag and the elbow, each for the measured, One Euro filtered and fitted landmarks.
+// --profile FILE: start from a hand profile (track/profile.h: the wearer's hand size and shape
+//             from earlier runs), as ft-hands does; --profile-out FILE: write the one this replay
+//             learned. Either turns on what the profile changes in the tracker (a new hand starts
+//             at the wearer's size, Tracker::set_user_scale); neither, and the replay is as before.
 // --skel NAME=VALUE: a skeleton setting (skel::Params: pos_min, pos_beta, rot_min, rot_beta,
 //             ang_min, ang_beta, d_cutoff, glitch, depth_ratio, limits, iterations), repeatable.
 // --labels FILE: frame-hands' auto-labels (labels.jsonl) for this recording: the landmarks'
@@ -166,6 +170,7 @@ int main(int argc, char **argv) {
     bool skeleton = true, pinch_fitted = false;
     skel::Params skel_params;
     std::string labels, hmd_poses, skeleton_dump, publish_dump;
+    std::string profile_in, profile_out;   // the hand profile to start from, and where to write this replay's
     PinchParams pinch_params;
     GripParams grip_params;
     std::string use = "mono", color_left = "color_video0", color_crop = "subtract", sides = "file";
@@ -211,6 +216,8 @@ int main(int argc, char **argv) {
         else if (a == "--hold" && more) hold = std::atof(argv[++i]);
         else if (a == "--search-budget" && more) search_budget1 = std::atoi(argv[++i]);
         else if (a == "--no-skeleton") skeleton = false;
+        else if (a == "--profile" && more) profile_in = argv[++i];
+        else if (a == "--profile-out" && more) profile_out = argv[++i];
         else if (a == "--pinch-fitted") pinch_fitted = true;
         else if (a == "--labels" && more) labels = argv[++i];
         else if (a == "--hmd-poses" && more) hmd_poses = argv[++i];
@@ -343,6 +350,24 @@ int main(int argc, char **argv) {
     }
     tracker.set_skeleton(skeleton);
     tracker.skeleton().set_params(skel_params);
+    // The hand profile (track/profile.h), off unless asked for so old replays repeat. --profile
+    // FILE starts from one, as ft-hands starts from the wearer's; --profile-out FILE writes what
+    // this replay learned. A replay into a file and a second one from it are the before and after.
+    if (!profile_in.empty() || !profile_out.empty()) {
+        tracker.set_user_scale(true);
+        if (!profile_in.empty()) {
+            profile::Profile prof;
+            std::string perr;
+            if (!profile::load(profile_in, prof, perr) || prof.empty())
+                return std::fprintf(stderr, "--profile %s: %s\n", profile_in.c_str(), perr.empty() ? "no profile there" : perr.c_str()), 1;
+            for (int s = 0; s < 2; ++s) {
+                tracker.skeleton().calibration(s).seed(prof.side[s].q, prof.side[s].n);
+                tracker.seed_user_scale(s, prof.side[s].scale);
+                std::printf("hand profile: %s size %.2f (%ld frames), shape %d/%d settled\n", s ? "right" : "left ",
+                            prof.side[s].scale.value, prof.side[s].scale.n, prof.side[s].settled(), skel::kQuantities);
+            }
+        }
+    }
     skeval::Eval eval;
     eval.dump = skeleton_dump;
     if (!labels.empty() && !eval.load_labels(labels)) return std::fprintf(stderr, "%s: can't read it\n", labels.c_str()), 1;
@@ -885,6 +910,21 @@ int main(int argc, char **argv) {
         std::printf("\n");
     }
     if (skeleton) eval.report(tracker.skeleton(), int64_t(t0), label_hits);
+    if (!profile_in.empty() || !profile_out.empty())
+        std::printf("hand profile: the wearer's hand size at the end: left %.3f (%ld frames) right %.3f (%ld frames); a new hand "
+                    "starts at %.3f\n",
+                    tracker.user_scale(0).value, tracker.user_scale(0).n, tracker.user_scale(1).value, tracker.user_scale(1).n,
+                    tracker.start_scale());
+    if (!profile_out.empty()) {
+        profile::Profile prof;
+        for (int s = 0; s < 2; ++s) {
+            tracker.skeleton().calibration(s).quantities(prof.side[s].q, prof.side[s].n);
+            prof.side[s].scale = tracker.user_scale(s);
+        }
+        std::string perr;
+        if (!profile::save(profile_out, prof, perr)) return std::fprintf(stderr, "--profile-out: %s\n", perr.c_str()), 1;
+        std::printf("hand profile: written to %s\n", profile_out.c_str());
+    }
     if (flags) {
         flags->finish();
         flags->wait();

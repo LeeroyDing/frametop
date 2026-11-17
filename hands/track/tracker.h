@@ -4,6 +4,7 @@
 
 #include "calib.h"
 #include "nets.h"
+#include "profile.h"
 #include "skeleton.h"
 
 #include <condition_variable>
@@ -142,6 +143,15 @@ public:
     // The skeleton fit (track/skeleton.h), after each hand's 3D. On by default.
     void set_skeleton(bool on) { skeleton_on_ = on; }
     skel::Skeleton &skeleton() { return skel_; }
+    // The wearer's hand size (track/profile.h), per side (0 left, 1 right): learned from every clean
+    // stereo frame, like Hand::scale, but kept past the hand, and by a profile past the run. When on,
+    // a new hand starts at it instead of at the model's average hand (1.0), so the first one-view
+    // frames of a hand this wearer's size aren't placed nearer or further than it is. Off by default,
+    // so old replays repeat; ft-hands turns it on with the profile.
+    void set_user_scale(bool on) { user_scale_on_ = on; }
+    void seed_user_scale(int side, const profile::Running &r) { user_scale_[side > 0] = r; }
+    const profile::Running &user_scale(int side) const { return user_scale_[side > 0]; }
+    double start_scale() const;   // a new hand's: the settled sides' mean (its side isn't known yet), else 1
     // One view's 3D hand: each landmark along its ray, as far as how big the palm looks says
     // for a hand `scale` times the model's (Hand::scale). False if the palm is degenerate.
     static bool single_view(const Camera &cam, const Landmarks &lm, double scale, V3 out[21]);
@@ -201,6 +211,8 @@ private:
     void note(const char *fmt, ...) const __attribute__((format(printf, 2, 3)));
     bool skeleton_on_ = true;
     skel::Skeleton skel_;
+    bool user_scale_on_ = false;
+    profile::Running user_scale_[2];   // left, right
     std::vector<View> views_;
     std::map<int, Hand> hands_;
     std::vector<Tile> tiles_;

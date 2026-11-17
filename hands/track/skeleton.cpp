@@ -256,6 +256,8 @@ bool measured_frame(const V3 p[21], int side, Rot &R) {
 
 double angle(V3 a, V3 b) { return std::acos(std::clamp(dot(unit(a), unit(b)), -1.0, 1.0)); }
 
+constexpr int kMaxSamples = 1'000'000'000;   // a count is only "settled or not" past kSettle
+
 double median(const std::vector<float> &v) {
     if (v.empty()) return 0;
     float tmp[Calibration::kSettle];
@@ -310,9 +312,22 @@ void Calibration::add(const V3 local[21], const bool ok[21], const bool finger_o
             }
         } else if (std::fabs(x[k] - est_[k]) < 0.3 * std::fabs(est_[k]) + 0.003) {
             est_[k] += std::clamp(x[k] - est_[k], -2e-5, 2e-5);   // a running median, at most 0.02 mm a sample
-            ++n_[k];
+            n_[k] += n_[k] < kMaxSamples;   // a profile carries the count from run to run
         }
     }
+}
+
+void Calibration::seed(const double q[kQuantities], const int n[kQuantities]) {
+    for (int k = 0; k < kQuantities; ++k) {
+        if (n[k] < kSettle || !std::isfinite(q[k])) continue;
+        est_[k] = q[k], n_[k] = std::min(n[k], kMaxSamples);
+        buf_[k].clear();
+        buf_[k].shrink_to_fit();
+    }
+}
+
+void Calibration::quantities(double q[kQuantities], int n[kQuantities]) const {
+    for (int k = 0; k < kQuantities; ++k) q[k] = est_[k], n[k] = n_[k];
 }
 
 Shape Calibration::shape(const Shape &prior) const {

@@ -32,6 +32,7 @@ ft-handsctl log [lines]
 ft-handsctl cutouts on|off|state  # ft-screens' hand cutouts, without stopping tracking
 ft-handsctl gestures            # pinches, grips and middle pinches, live (tools/watch_gestures.py --distance)
 ft-handsctl flag [note...]      # flag a tracking failure: the last seconds go to a folder (see "Flags")
+ft-handsctl profile [forget]    # the hand profile: what ft-hands has learned about your hands; forget deletes it
 
 hands/ft-cutouts on | off | status   # the cutouts only: no pinches or grips
 
@@ -54,6 +55,7 @@ Settings in `~/.config/frametop.conf` (`FT_<name>` in the environment overrides 
 - `HANDS_MODELS` (unset: what `HANDS_MODEL` picks; by default `hands/models/student`, the fine-tuned models, when `hands/models.sh` fetched them, else `hands/models/ncnn`, the stock MediaPipe models): a folder holding `palm.ncnn.*` and `hand.ncnn.*`, as `--models`. Use it to try other models without passing options to every launcher. The fine-tuned folders lack the `*-int8` files, so `--int8` without `--models` uses the stock ones.
 - `HANDS_MODELS_UPDATE=1`: when hand tracking starts, fetch the fine-tuned models GitHub's branch pins if they changed, without a new release (`models.sh` below). `0` keeps the ones it came with.
 - `HANDS_COLOR_LEFT` (`color_video0`), `HANDS_COLOR_CROP` (`subtract`): how the colour module's calibration maps onto its images, as `--color-left` and `--color-crop`.
+- `HANDS_PROFILE=1`: keep what ft-hands learns about your hands (their size and bone lengths) between runs, in `~/.local/state/frametop/hands/profile` (see [tracking.md](tracking.md#hand-profile)); `0` reads and writes nothing. As `--profile FILE|0`.
 - `HANDS_SKELETON=1`: fit a skeleton with your bone lengths and publish it (see "Skeleton" below); `0` publishes the filtered landmarks as before. As `--skeleton`.
 - `HANDS_PINCH_DIP=0`: `1` also starts a pinch on a quick dip of the thumb-index distance that never reaches 2 cm (see the pinch under "Gestures" below). As `--pinch-dip`.
 - `HANDS_FLAG_BUFFER=1`: keep the last seconds of hand crops in RAM for `ft-handsctl flag` (see "Flags"); `0` keeps nothing. As `--flag-buffer`. `HANDS_FLAG_SECONDS` (12), `HANDS_FLAG_CROP` (224 px), `HANDS_FLAG_MB` (80) size it. `HANDS_FLAG_DIR` (`~/.local/share/frametop/hands/flags`) is where flags go; `HANDS_FLAG_FLASH=1` pulses the drawn hands when a flag is taken, `HANDS_FLAG_TONE=1` adds a short tone, `HANDS_FLAG_VIEW=1` saves a frame of your view.

@@ -30,6 +30,9 @@ constexpr double kMonoDepthGain = 0.1;
 // model's average hand, clean stereo pairs measure 0.71-1.51 times the one-view distance
 // (5-95%, median 1.16); pairs of two different hands mostly far less.
 constexpr double kSizePrior = 1.16, kRatioLo = 0.6, kRatioHi = 1.9;
+// The wearer's hand size (Tracker::user_scale) moves at most this far a clean stereo frame once
+// it has settled: 0.05 in 100 frames, so a few seconds of someone else's hands hardly show.
+constexpr double kUserScaleStep = 0.0005;
 
 double ms_since(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
@@ -170,6 +173,15 @@ std::vector<std::string> Tracker::describe_tiles() const {
     return out;
 }
 
+double Tracker::start_scale() const {
+    if (!user_scale_on_) return 1.0;
+    double sum = 0;
+    int n = 0;
+    for (const profile::Running &r : user_scale_)
+        if (r.settled()) sum += r.value, ++n;
+    return n ? sum / n : 1.0;
+}
+
 double Tracker::interval() const {
     double fastest = -1;
     for (const auto &[id, h] : hands_)
@@ -288,8 +300,12 @@ bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
         }
         std::nth_element(t.begin(), t.begin() + t.size() / 2, t.end());
         std::nth_element(m.begin(), m.begin() + m.size() / 2, m.end());
-        if (m[m.size() / 2] > 0 && residual < 0.008)   // only from clean matches
-            hand.scale += 0.1 * (std::clamp(t[t.size() / 2] / m[m.size() / 2], 0.8, 1.6) - hand.scale);
+        if (m[m.size() / 2] > 0 && residual < 0.008) {   // only from clean matches
+            const double r = std::clamp(t[t.size() / 2] / m[m.size() / 2], profile::kScaleMin, profile::kScaleMax);
+            hand.scale += 0.1 * (r - hand.scale);
+            // and the wearer's, once the hand has been seen long enough for its side to be known
+            if (hand.frames >= 5) user_scale_[hand.right()].add(r, kUserScaleStep);
+        }
         std::copy(pts, pts + 21, hand.pts);
         hand.residual = residual;
         std::copy(res_pt, res_pt + 21, hand.res_pt);
@@ -670,7 +686,7 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
     for (View &v : views_) {
         if (v.hand > 0 && hands_.count(v.hand)) continue;
         V3 guess[21];
-        const bool have_guess = single_view(*v.cam, v.lm, 1.0, guess);
+        const bool have_guess = single_view(*v.cam, v.lm, start_scale(), guess);
         int best = 0;
         double dist = 0.12;
         for (auto &[id, h] : hands_) {
@@ -684,6 +700,7 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
         if (!best) {
             best = next_id_++;
             hands_[best].id = best;
+            hands_[best].scale = start_scale();
             ++stats.created;
             note("new %d %s", best, v.cam->name.c_str());
         } else {
@@ -746,6 +763,7 @@ std::vector<const Hand *> Tracker::step(const std::map<std::string, Image> &imag
         if (v.hand <= 0) {
             v.hand = next_id_++;
             hands_[v.hand].id = v.hand;
+            hands_[v.hand].scale = start_scale();
             ++stats.created;
             note("new %d %s (split off)", v.hand, v.cam->name.c_str());
         }

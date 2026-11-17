@@ -91,6 +91,7 @@
 namespace {
 
 volatile std::sig_atomic_t g_stop = 0, g_record = 0;
+constexpr double kProfileSaveS = 300;   // the hand profile is written this often while it changes
 
 // Which calibrated camera each video device carries. XRService names each tracking camera's
 // sensor subdev once per instance ("Found camera 'slam_left': interface=msm_csiphy0
@@ -292,6 +293,10 @@ int main(int argc, char **argv) {
     // the skeleton fit (track/skeleton.h): published as fh_hands version 2, and as version 1's
     // points and capsules; 0 publishes the One Euro filtered landmarks as before, and no skeleton
     bool skeleton = setting("HANDS_SKELETON") != "0";
+    // the hand profile (track/profile.h): this wearer's hand size and shape, kept between runs.
+    // HANDS_PROFILE=0 turns it off; --profile FILE keeps it somewhere else (and on for a test run).
+    bool profile_on = setting("HANDS_PROFILE") != "0";
+    std::string profile_path;
     PinchParams pinch_params;
     pinch_params.dip = setting("HANDS_PINCH_DIP") == "1";
     setting_number("HANDS_PINCH_FIST_CURL", pinch_params.fist_curl);
@@ -348,6 +353,11 @@ int main(int argc, char **argv) {
         else if (a == "--pair-sides" && more) pair_sides = std::string(argv[++i]) == "1";
         else if (a == "--hold" && more) hold = std::atof(argv[++i]);
         else if (a == "--skeleton" && more) skeleton = std::string(argv[++i]) != "0";
+        else if (a == "--profile" && more) {
+            profile_path = argv[++i];
+            profile_on = profile_path != "0";
+            if (!profile_on) profile_path.clear();
+        }
         else if (a == "--flag-buffer" && more) flag_on = std::string(argv[++i]) != "0";
         else if (a == "--cams" && more) cams_arg = argv[++i];
         else if (a == "--bright" && more) bright_arg = argv[++i];
@@ -372,6 +382,8 @@ int main(int argc, char **argv) {
                         "          [--misread-guard 0|1] (0; 1 for fine-tuned landmark models: see Tracker::set_misread_guard)\n"
                         "          [--reacquire S] (1.5; 0: off: see Tracker::set_reacquire) [--pair-sides 0|1] (1) [--hold S] (0.6)\n"
                         "          [--skeleton 0|1] (1: fit a skeleton with the user's bone lengths and publish it; HANDS_SKELETON)\n"
+                        "          [--profile FILE|0] (the wearer's hand size and shape, kept between runs: track/profile.h;\n"
+                        "          ~/.local/state/frametop/hands/profile; 0: none, as HANDS_PROFILE=0)\n"
                         "          [--flag-buffer 0|1] (1: keep the last seconds for `ft-handsctl flag`; HANDS_FLAG_BUFFER)\n"
                         "          [--cams auto|mono|color|all] (auto) [--bright all|color] (all) [--bright-on L] (40) [--bright-off L] (25)\n"
                         "          [--color-left color_video0|color_video3] [--color-crop subtract|none]\n"
@@ -389,7 +401,8 @@ int main(int argc, char **argv) {
                         "auto picks the cameras by the light (see the top of track/main.cpp).\n"
                         "Settings in ~/.config/frametop.conf: HANDS_SWAP_SIDES=auto|0|1, HANDS_CPUS=5,6,7, HANDS_CAMERAS, HANDS_BRIGHT,\n"
                         "HANDS_BRIGHT_ON, HANDS_BRIGHT_OFF, HANDS_COLOR_LEFT, HANDS_COLOR_CROP, HANDS_MISREAD_GUARD=0|1, HANDS_MODELS=DIR,\n"
-                        "HANDS_PINCH_DIP=0|1, HANDS_PINCH_FIST_CURL, HANDS_FLAG_BUFFER=0|1, HANDS_FLAG_SECONDS, HANDS_FLAG_CROP, HANDS_FLAG_MB\n"
+                        "HANDS_PINCH_DIP=0|1, HANDS_PINCH_FIST_CURL, HANDS_FLAG_BUFFER=0|1, HANDS_FLAG_SECONDS, HANDS_FLAG_CROP, HANDS_FLAG_MB,\n"
+                        "HANDS_PROFILE=0|1\n"
                         "(FT_<name> overrides).\n",
                         argv[0]);
             return a == "--help" ? 0 : 1;
@@ -600,6 +613,46 @@ int main(int argc, char **argv) {
     tracker.set_pair_sides(pair_sides);
     tracker.set_hold(reacquire > 0 ? hold : 0.3);
     tracker.set_skeleton(skeleton);
+    // The hand profile: the live tracker's (one that publishes), or the file a test run names. A
+    // run on a replayed ring without --profile neither reads the wearer's nor writes over it.
+    const bool profiling = track && profile_on && (publish || !profile_path.empty());
+    profile::Profile prof;
+    std::string prof_text;   // what the file holds
+    int prof_saves = 0;
+    if (profiling) {
+        if (profile_path.empty()) profile_path = profile::default_path();
+        std::string perr;
+        if (!profile::load(profile_path, prof, perr)) std::printf("hand profile: %s: learning afresh\n", perr.c_str());
+        tracker.set_user_scale(true);
+        for (int s = 0; s < 2; ++s) {
+            tracker.skeleton().calibration(s).seed(prof.side[s].q, prof.side[s].n);
+            tracker.seed_user_scale(s, prof.side[s].scale);
+        }
+        if (prof.empty()) {
+            std::printf("hand profile: none yet in %s: learning this wearer's hands\n", profile_path.c_str());
+        } else {
+            prof_text = profile::text(prof);
+            std::printf("hand profile: %s:", profile_path.c_str());
+            for (int s = 0; s < 2; ++s)
+                std::printf(" %s size %.2f (%ld frames), shape %d/%d settled%s", s ? "right" : "left", prof.side[s].scale.value,
+                            prof.side[s].scale.n, prof.side[s].settled(), skel::kQuantities, s ? "\n" : ";");
+        }
+    }
+    // Writes the profile when what the tracker knows has changed: every few minutes, and as it stops.
+    auto save_profile = [&] {
+        if (!profiling) return;
+        for (int s = 0; s < 2; ++s) {
+            tracker.skeleton().calibration(s).quantities(prof.side[s].q, prof.side[s].n);
+            prof.side[s].scale = tracker.user_scale(s);
+        }
+        if (prof.empty()) return;
+        const std::string now_text = profile::text(prof);
+        if (now_text == prof_text) return;
+        std::string perr;
+        if (profile::save(profile_path, prof, perr)) prof_text = now_text, ++prof_saves;
+        else std::printf("hand profile: not saved: %s\n", perr.c_str());
+    };
+    uint64_t t_profile = mono_ns();
     std::map<std::string, std::vector<uint8_t>> pixels;
     // A mono set is the side pair's newer frames (all the mono cameras' without both sides) with
     // the upper pair's from the same moment. XRService keeps the uppers in step with the sides,
@@ -1153,6 +1206,7 @@ int main(int argc, char **argv) {
         left_sets += on_left, right_sets += on_right, both_sets += on_left && on_right;
 
         const uint64_t now = mono_ns();
+        if ((now - t_profile) / 1e9 >= kProfileSaveS) save_profile(), t_profile = now;
         if (status > 0 && (now - t_status) / 1e9 >= status) {
             const double dt = (now - t_status) / 1e9, cpu1 = cpu_seconds();
             const Stats &s = tracker.stats;
@@ -1190,6 +1244,12 @@ int main(int argc, char **argv) {
             if (checking)
                 std::printf("        side cameras: %s, %s\n", side_round ? "checking the decision" : "deciding",
                             side_check.summary().c_str());
+            if (profiling)
+                std::printf("        hand profile: size left %.2f right %.2f (new hands start at %.2f)  shape settled left %.0f%% "
+                            "right %.0f%%  saved %d time(s)\n",
+                            tracker.user_scale(0).value, tracker.user_scale(1).value, tracker.start_scale(),
+                            100 * tracker.skeleton().calibration(0).settled(), 100 * tracker.skeleton().calibration(1).settled(),
+                            prof_saves);
             if (gestures_on) {
                 std::printf("        pinches: left %u right %u (held back, palm down: %d %d)  middle pinches: left %u right %u  "
                             "grips: left %u right %u",
@@ -1215,6 +1275,7 @@ int main(int argc, char **argv) {
             color_steps = 0;
         }
     }
+    save_profile();   // before the exec below too: the next ft-hands starts from it
     if (flags) flags->finish(), flags->wait();
     if (!color.empty()) unlink(want_file.c_str());
     if (parked) unlink(hands_want_file.c_str());

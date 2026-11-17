@@ -2,7 +2,7 @@
 #   make          ft-camd (camd/: runs on the host, so linked statically) and ft-hands (track/)
 #   make tools    ft-handreplay and ft-ringplay, for recordings
 #   make check    builds and runs the C++ unit tests (tests/sides_test.cpp, tests/skeleton_test.cpp,
-#                 tests/pinch_test.cpp, tests/flagbuf_test.cpp)
+#                 tests/profile_test.cpp, tests/pinch_test.cpp, tests/flagbuf_test.cpp)
 # The first build fetches ncnn's source (release NCNN_TAG, commit e54f7b1f88434e1d844ea0551b880a1cfb079ce1)
 # and builds it into build/ncnn, which takes a few minutes. The download is the release's
 # full-source zip, checked by NCNN_SHA256 (the digest GitHub lists for that asset). NCNN=DIR
@@ -18,7 +18,7 @@ LDLIBS    = $(NCNN)/lib/libncnn.a -ljsoncpp -fopenmp -lpthread
 LDFLAGS  ?=
 
 CAMD  = camd/camd.c camd/tp.c camd/xrcams.c
-TRACK = track/calib.cpp track/nets.cpp track/tracker.cpp track/io.cpp track/record.cpp track/pinch.cpp track/sides.cpp track/skeleton.cpp track/flagbuf.cpp
+TRACK = track/calib.cpp track/nets.cpp track/tracker.cpp track/io.cpp track/record.cpp track/pinch.cpp track/sides.cpp track/skeleton.cpp track/flagbuf.cpp track/profile.cpp
 HDR   = $(wildcard track/*.h) camd/fhring.h include/fh_hands.h include/fh_gestures.h ../conf/ft_conf.h
 
 all: build/ft-camd build/ft-hands
@@ -44,6 +44,10 @@ build/skeleton-test: tests/skeleton_test.cpp track/skeleton.cpp track/skeleton.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/skeleton_test.cpp track/skeleton.cpp
 
+build/profile-test: tests/profile_test.cpp track/profile.cpp track/profile.h track/skeleton.cpp track/skeleton.h track/geom.h
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/profile_test.cpp track/profile.cpp track/skeleton.cpp
+
 build/pinch-test: tests/pinch_test.cpp $(TRACK) $(HDR) $(NCNN)/lib/libncnn.a
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/pinch_test.cpp $(TRACK) $(LDLIBS)
@@ -52,9 +56,10 @@ build/flagbuf-test: tests/flagbuf_test.cpp $(TRACK) $(HDR) $(NCNN)/lib/libncnn.a
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/flagbuf_test.cpp $(TRACK) $(LDLIBS)
 
-check: build/sides-test build/skeleton-test build/pinch-test build/flagbuf-test
+check: build/sides-test build/skeleton-test build/profile-test build/pinch-test build/flagbuf-test
 	build/sides-test
 	build/skeleton-test
+	build/profile-test
 	build/pinch-test
 	build/flagbuf-test
 
@@ -75,6 +80,6 @@ build/ncnn/install/lib/libncnn.a:
 	cmake --build build/ncnn/build --target install > build/ncnn/build.log
 
 clean:
-	rm -f build/ft-camd build/ft-hands build/ft-handreplay build/ft-ringplay build/sides-test build/skeleton-test build/pinch-test build/flagbuf-test
+	rm -f build/ft-camd build/ft-hands build/ft-handreplay build/ft-ringplay build/sides-test build/skeleton-test build/profile-test build/pinch-test build/flagbuf-test
 
 .PHONY: all tools check clean
