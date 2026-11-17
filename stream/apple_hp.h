@@ -706,8 +706,74 @@ struct NegotiatedCanvas {
     uint32_t ltrp_enabled = 0;
 };
 
+inline bool ParseNegotiatedVideoProtobuf(const std::vector<uint8_t> &dec, NegotiatedCanvas *out) {
+    uint32_t cw = 0, ch = 0, ct = 0, ltr = 0;
+    size_t pos = 0;
+    while (pos < dec.size()) {
+        uint64_t tag = 0;
+        if (!ReadVarint(dec.data(), dec.size(), &pos, &tag)) break;
+        const uint32_t fn = uint32_t(tag >> 3);
+        const uint32_t wt = uint32_t(tag & 7);
+        if (wt == 0) {
+            uint64_t dummy = 0;
+            if (!ReadVarint(dec.data(), dec.size(), &pos, &dummy)) break;
+        } else if (wt == 2) {
+            uint64_t slen = 0;
+            if (!ReadVarint(dec.data(), dec.size(), &pos, &slen) || slen > dec.size() - pos) break;
+            if (fn == 5) {
+                size_t sp = pos;
+                const size_t send = pos + size_t(slen);
+                while (sp < send) {
+                    uint64_t stag = 0;
+                    if (!ReadVarint(dec.data(), send, &sp, &stag)) break;
+                    const uint32_t sfn = uint32_t(stag >> 3);
+                    const uint32_t swt = uint32_t(stag & 7);
+                    if (swt == 0) {
+                        uint64_t v = 0;
+                        if (!ReadVarint(dec.data(), send, &sp, &v)) break;
+                        if (sfn == 4) cw = uint32_t(v);
+                        else if (sfn == 5) ch = uint32_t(v);
+                        else if (sfn == 6) ct = uint32_t(v);
+                        else if (sfn == 7) ltr = uint32_t(v);
+                    } else if (swt == 2) {
+                        uint64_t ilen = 0;
+                        if (!ReadVarint(dec.data(), send, &sp, &ilen) || ilen > send - sp) break;
+                        sp += size_t(ilen);
+                    } else if (swt == 1) {
+                        if (send - sp < 8) break;
+                        sp += 8;
+                    } else if (swt == 5) {
+                        if (send - sp < 4) break;
+                        sp += 4;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            pos += size_t(slen);
+        } else if (wt == 1) {
+            if (dec.size() - pos < 8) break;
+            pos += 8;
+        } else if (wt == 5) {
+            if (dec.size() - pos < 4) break;
+            pos += 4;
+        } else {
+            break;
+        }
+    }
+    if (cw > 0 && ch > 0) {
+        out->width = cw;
+        out->height = ch;
+        out->tiles = ct ? ct : 1;
+        out->ltrp_enabled = ltr;
+        return true;
+    }
+    return false;
+}
+
 inline bool ExtractCanvasDims(const std::vector<uint8_t> &answer_msg, NegotiatedCanvas *out) {
     if (answer_msg.empty() || answer_msg[0] != 0x00) return false;
+    // 1. macOS 14/15: AVCMediaStreamNegotiator.answer wraps the zlib protobuf in a bplist00 dict.
     for (size_t idx = 0; idx + 40 <= answer_msg.size(); ++idx) {
         if (std::memcmp(answer_msg.data() + idx, "bplist00", 8) != 0) continue;
         for (size_t end = idx + 40; end <= answer_msg.size(); ++end) {
@@ -723,68 +789,20 @@ inline bool ExtractCanvasDims(const std::vector<uint8_t> &answer_msg, Negotiated
             std::vector<uint8_t> zblob, dec;
             if (!ParseBplistMediaBlob(answer_msg.data() + idx, blen, &zblob)) continue;
             if (!ZlibDecompress(zblob.data(), zblob.size(), &dec)) continue;
-
-            uint32_t cw = 0, ch = 0, ct = 0, ltr = 0;
-            size_t pos = 0;
-            while (pos < dec.size()) {
-                uint64_t tag = 0;
-                if (!ReadVarint(dec.data(), dec.size(), &pos, &tag)) break;
-                const uint32_t fn = uint32_t(tag >> 3);
-                const uint32_t wt = uint32_t(tag & 7);
-                if (wt == 0) {
-                    uint64_t dummy = 0;
-                    if (!ReadVarint(dec.data(), dec.size(), &pos, &dummy)) break;
-                } else if (wt == 2) {
-                    uint64_t slen = 0;
-                    if (!ReadVarint(dec.data(), dec.size(), &pos, &slen) || slen > dec.size() - pos) break;
-                    if (fn == 5) {
-                        size_t sp = pos;
-                        const size_t send = pos + size_t(slen);
-                        while (sp < send) {
-                            uint64_t stag = 0;
-                            if (!ReadVarint(dec.data(), send, &sp, &stag)) break;
-                            const uint32_t sfn = uint32_t(stag >> 3);
-                            const uint32_t swt = uint32_t(stag & 7);
-                            if (swt == 0) {
-                                uint64_t v = 0;
-                                if (!ReadVarint(dec.data(), send, &sp, &v)) break;
-                                if (sfn == 4) cw = uint32_t(v);
-                                else if (sfn == 5) ch = uint32_t(v);
-                                else if (sfn == 6) ct = uint32_t(v);
-                                else if (sfn == 7) ltr = uint32_t(v);
-                            } else if (swt == 2) {
-                                uint64_t ilen = 0;
-                                if (!ReadVarint(dec.data(), send, &sp, &ilen) || ilen > send - sp) break;
-                                sp += size_t(ilen);
-                            } else if (swt == 1) {
-                                if (send - sp < 8) break;
-                                sp += 8;
-                            } else if (swt == 5) {
-                                if (send - sp < 4) break;
-                                sp += 4;
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    pos += size_t(slen);
-                } else if (wt == 1) {
-                    if (dec.size() - pos < 8) break;
-                    pos += 8;
-                } else if (wt == 5) {
-                    if (dec.size() - pos < 4) break;
-                    pos += 4;
-                } else {
-                    break;
-                }
-            }
-            if (cw > 0 && ch > 0) {
-                out->width = cw;
-                out->height = ch;
-                out->tiles = ct ? ct : 1;
-                out->ltrp_enabled = ltr;
-                return true;
-            }
+            if (ParseNegotiatedVideoProtobuf(dec, out)) return true;
+        }
+    }
+    // 2. macOS 26/27+: AVCMediaStreamNegotiator.answer emits a raw RFC 1950 zlib stream (e.g. 0x78 0xda)
+    //    directly without a bplist00 wrapper. ZlibDecompress stops cleanly at Z_STREAM_END + Adler32.
+    for (size_t idx = 4; idx + 16 <= answer_msg.size(); ++idx) {
+        const uint8_t cmf = answer_msg[idx];
+        const uint8_t flg = answer_msg[idx + 1];
+        if ((cmf & 0x0f) != 8 || (cmf >> 4) > 7 || (flg & 0x20) != 0) continue;
+        if (((uint16_t(cmf) << 8) | uint16_t(flg)) % 31 != 0) continue;
+        std::vector<uint8_t> dec;
+        if (ZlibDecompress(answer_msg.data() + idx, answer_msg.size() - idx, &dec) &&
+            ParseNegotiatedVideoProtobuf(dec, out)) {
+            return true;
         }
     }
     return false;
@@ -2726,10 +2744,12 @@ private:
     bool RunAuthWithFallback(const SessionOptions &opt, std::array<uint8_t, 16> *wrap_key, std::string *err_out) {
         if (opt.auth_mode == AuthMode::kSrp) return RunSingleAuth(true, wrap_key, err_out);
         if (opt.auth_mode == AuthMode::kNonSrp) return RunSingleAuth(false, wrap_key, err_out);
-        std::string srp_err;
+        std::string srp_err, nonsrp_err;
         if (RunSingleAuth(true, wrap_key, &srp_err)) return true;
         if (tcp_fd_ >= 0) close(tcp_fd_), tcp_fd_ = -1;
-        return RunSingleAuth(false, wrap_key, err_out);
+        if (RunSingleAuth(false, wrap_key, &nonsrp_err)) return true;
+        if (err_out) *err_out = srp_err + "; fallback " + nonsrp_err;
+        return false;
     }
 
     bool HandleOptionalSessionSelect(const SessionOptions &opt, const uint8_t ecb_key[16], std::string *err_out) {
