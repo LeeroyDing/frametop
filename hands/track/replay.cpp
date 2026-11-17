@@ -867,6 +867,14 @@ int main(int argc, char **argv) {
         if (!r.empty())
             std::printf("single-view distance / stereo: 10%% %.2f, median %.2f, 90%% %.2f; change between frames median %.3f, 90%% %.3f\n",
                         r[r.size() / 10], r[r.size() / 2], r[r.size() * 9 / 10], step[step.size() / 2], step[step.size() * 9 / 10]);
+        std::vector<double> fresh = s.mono_ratio_new;
+        std::sort(fresh.begin(), fresh.end());
+        if (!fresh.empty()) {
+            double off = 0;
+            for (double x : fresh) off += std::fabs(x - 1) / double(fresh.size());
+            std::printf("  in a hand's first 10 frames (%zu readings): 10%% %.2f, median %.2f, 90%% %.2f; off by %.1f%% on average\n",
+                        fresh.size(), fresh[fresh.size() / 10], fresh[fresh.size() / 2], fresh[fresh.size() * 9 / 10], 100 * off);
+        }
     }
     std::printf("palms within 20 cm of the eyes: %d of %d hand updates\n", near_face, hand_updates);
     for (int k = 0; k < 2; ++k) std::sort(pinch_len[k].begin(), pinch_len[k].end());

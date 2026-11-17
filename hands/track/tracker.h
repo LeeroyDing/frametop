@@ -69,6 +69,8 @@ struct Stats {
     int created = 0, merged = 0, forgotten = 0;   // merged: views re-paired across cameras
     // diagnostics: on stereo frames, each view's single-view palm distance / the stereo one
     std::vector<std::pair<int, double>> mono_ratio;   // (hand id, ratio)
+    std::vector<double> mono_ratio_new;               // the same in a hand's first 10 frames: before it has
+                                                      // learned its own size (what a profile's is for)
 };
 
 // A hand the landmark model found in one camera (Tracker::views_now, Tracker::exhaustive).

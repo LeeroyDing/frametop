@@ -336,6 +336,7 @@ bool Tracker::hand_3d(Hand &hand, std::vector<View *> views, int64_t t_ns) {
             if (!single_view(*v->cam, v->lm, hand.scale, mono)) continue;
             const V3 o = v->cam->origin;
             stats.mono_ratio.push_back({hand.id, norm(mono[9] - o) / norm(pts[9] - o)});
+            if (hand.frames < 10) stats.mono_ratio_new.push_back(norm(mono[9] - o) / norm(pts[9] - o));
         }
     } else {
         const Camera &cam = *views[0]->cam;
