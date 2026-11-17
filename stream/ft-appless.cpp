@@ -355,41 +355,7 @@ private:
 };
 
 void ResolveAppleMode(const std::string &app, int req_w, int req_h, ft_apple_hp::SessionOptions *opt) {
-    if (app == "apple:physical") {
-        opt->virtual_display = false;
-        return;
-    }
-    opt->virtual_display = true;
-    const int cw = std::clamp(req_w, 1280, 3840) & ~1;
-    const int ch = std::clamp(req_h, 720, 2160) & ~1;
-    if (app == "apple:virtual@1") {
-        opt->hidpi_scale = 1.0;
-        opt->logical_w = uint32_t(cw);
-        opt->logical_h = uint32_t(ch);
-        return;
-    }
-    if (app == "apple:virtual@2") {
-        opt->hidpi_scale = 2.0;
-        if (req_w <= 1920 && req_h <= 1200) {
-            opt->logical_w = uint32_t(std::clamp(req_w, 640, 1920));
-            opt->logical_h = uint32_t(std::clamp(req_h, 360, 1080));
-        } else {
-            opt->logical_w = uint32_t(std::max(640, cw / 2));
-            opt->logical_h = uint32_t(std::max(360, ch / 2));
-        }
-        return;
-    }
-    // Default "apple:virtual": >= 2560x1440 uses 2x Retina (e.g. 3840x2160 -> 1920x1080@2x);
-    // smaller stream budgets (e.g. 1920x1080) use 1x so stream pixels match requested size.
-    if (cw >= 2560 && ch >= 1440) {
-        opt->hidpi_scale = 2.0;
-        opt->logical_w = uint32_t(cw / 2);
-        opt->logical_h = uint32_t(ch / 2);
-    } else {
-        opt->hidpi_scale = 1.0;
-        opt->logical_w = uint32_t(cw);
-        opt->logical_h = uint32_t(ch);
-    }
+    ft_apple_hp::ResolveAppleDisplayMode(app, req_w, req_h, opt);
 }
 
 int RunStream(const std::string &host, const std::string &route, int port, const std::string &app,

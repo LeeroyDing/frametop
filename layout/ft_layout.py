@@ -152,9 +152,9 @@ STREAMS_ONLY_PATH = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp", "f
 # The sizes Display Settings offers for a screen and Remote Displays for a stream: (w, h, what).
 # ft-screens has no pixel limit; portrait screens are just tall.
 SCREEN_RESOLUTIONS = [(1920, 1080, ""), (2560, 1440, ""), (3840, 2160, "4K"), (2560, 1080, "ultrawide"),
-                      (3440, 1440, "ultrawide"), (5120, 1440, "super ultrawide"), (1920, 1200, "16:10"),
-                      (2560, 1600, "16:10"), (1080, 1920, "portrait"), (1440, 2560, "portrait"),
-                      (2160, 3840, "portrait 4K")]
+                      (3440, 1440, "ultrawide"), (4096, 1152, "32:9 ultrawide"), (5120, 1440, "super ultrawide"),
+                      (1920, 1200, "16:10"), (2560, 1600, "16:10"), (1080, 1920, "portrait"),
+                      (1440, 2560, "portrait"), (2160, 3840, "portrait 4K")]
 REPO = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "conf"))
 import ft_conf  # noqa: E402  (frametop.conf's grammar, docs/config.md)

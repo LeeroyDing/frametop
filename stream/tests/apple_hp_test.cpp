@@ -319,6 +319,37 @@ void TestDisplayConfig0x1dAnd0x451() {
     CHECK(ReadBe32(&m[12 + 0x9c + 8]) == 1920);
     CHECK(ReadBe32(&m[12 + 0x9c + 12]) == 1080);
 
+    // 4096x1152 32:9 ultra-wide at 1x scaling raises max_width to 4096 and keeps all modes even.
+    const auto uw = BuildVirtualDisplay0x1d(4096, 1152, 1.0, false);
+    CHECK(uw.size() == 308);
+    CHECK(ReadBe32(&uw[12 + 0x8a]) == 4096);
+    CHECK(ReadBe32(&uw[12 + 0x8e]) == 2160);
+    CHECK(ReadBe32(&uw[12 + 0x9c + 0]) == 4096);
+    CHECK(ReadBe32(&uw[12 + 0x9c + 4]) == 1152);
+    CHECK(ReadBe32(&uw[12 + 0x9c + 8]) == 4096);
+    CHECK(ReadBe32(&uw[12 + 0x9c + 12]) == 1152);
+    for (size_t i = 0; i < 5; ++i) {
+        const size_t off = 12 + 0x9c + 28 * i;
+        CHECK((ReadBe32(&uw[off + 0]) & 1u) == 0);
+        CHECK((ReadBe32(&uw[off + 4]) & 1u) == 0);
+        CHECK((ReadBe32(&uw[off + 8]) & 1u) == 0);
+        CHECK((ReadBe32(&uw[off + 12]) & 1u) == 0);
+    }
+
+    SessionOptions opt{};
+    ResolveAppleDisplayMode("apple:virtual", 3840, 2160, &opt);
+    CHECK(opt.virtual_display && opt.hidpi_scale == 2.0 && opt.logical_w == 1920 && opt.logical_h == 1080);
+    ResolveAppleDisplayMode("apple:virtual", 4096, 1152, &opt);
+    CHECK(opt.virtual_display && opt.hidpi_scale == 1.0 && opt.logical_w == 4096 && opt.logical_h == 1152);
+    ResolveAppleDisplayMode("apple:virtual@1", 4096, 1152, &opt);
+    CHECK(opt.virtual_display && opt.hidpi_scale == 1.0 && opt.logical_w == 4096 && opt.logical_h == 1152);
+    ResolveAppleDisplayMode("apple:virtual", 5120, 1440, &opt);
+    CHECK(opt.virtual_display && opt.hidpi_scale == 1.0 && opt.logical_w == 4096 && opt.logical_h == 1152);
+    ResolveAppleDisplayMode("apple:virtual@2", 2048, 900, &opt);
+    CHECK(opt.virtual_display && opt.hidpi_scale == 2.0 && opt.logical_w == 2048 && opt.logical_h == 900);
+    ResolveAppleDisplayMode("apple:physical", 4096, 1152, &opt);
+    CHECK(!opt.virtual_display);
+
     std::vector<uint8_t> l451(20 + 56, 0);
     WriteBe16(&l451[0], 5);
     WriteBe16(&l451[2], 1920);

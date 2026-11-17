@@ -1005,25 +1005,32 @@ inline std::vector<uint8_t> BuildVirtualDisplay0x1d(uint32_t logical_w, uint32_t
     WriteBe16(&di[0x00], kDiSize);
     const size_t nlen = std::min<size_t>(119, name.size());
     std::memcpy(&di[0x02], name.data(), nlen);
-    WriteBe32(&di[0x7a], 1);     // DYNAMIC_RESOLUTION
-    WriteBe32(&di[0x7e], 4);     // display_type = 4 (virtual display)
+    const uint32_t target_mw = std::clamp<uint32_t>(
+        uint32_t(std::lround(logical_w * hidpi_scale)) & ~1u, 1280, 4096);
+    const uint32_t target_mh = std::clamp<uint32_t>(
+        uint32_t(std::lround(logical_h * hidpi_scale)) & ~1u, 720, 2304);
+    const uint32_t max_w = std::max<uint32_t>(3840, target_mw);
+    const uint32_t max_h = std::max<uint32_t>(2160, target_mh);
+
+    WriteBe32(&di[0x7a], 1);      // DYNAMIC_RESOLUTION
+    WriteBe32(&di[0x7e], 4);      // display_type = 4 (virtual display)
     WriteF32Be(&di[0x82], 369.45f);
     WriteF32Be(&di[0x86], 207.82f);
-    WriteBe32(&di[0x8a], 3840);  // max_width
-    WriteBe32(&di[0x8e], 2160);  // max_height
-    WriteBe16(&di[0x92], 0);     // current_mode_index
-    WriteBe16(&di[0x94], 0);     // preferred_mode_index
-    WriteBe32(&di[0x96], 7);     // rotations / native 0x1d marker
+    WriteBe32(&di[0x8a], max_w);  // max_width (up to Apple Silicon H.264 4096-px ceiling)
+    WriteBe32(&di[0x8e], max_h);  // max_height
+    WriteBe16(&di[0x92], 0);      // current_mode_index
+    WriteBe16(&di[0x94], 0);      // preferred_mode_index
+    WriteBe32(&di[0x96], 7);      // rotations / native 0x1d marker
     WriteBe16(&di[0x9a], kModeCount);
 
     static constexpr double kScales[kModeCount] = {1.0, 0.85, 0.75, 0.67, 0.5};
     const uint32_t mode_flags = hdr ? 1u : 0u;
     const double hz = std::clamp(refresh_hz, 15.0, 120.0);
     for (uint16_t i = 0; i < kModeCount; ++i) {
-        const uint32_t msw = std::max<uint32_t>(640, uint32_t(std::lround(logical_w * kScales[i])));
-        const uint32_t msh = std::max<uint32_t>(360, uint32_t(std::lround(logical_h * kScales[i])));
-        const uint32_t mw = std::min<uint32_t>(3840, uint32_t(std::lround(msw * hidpi_scale)));
-        const uint32_t mh = std::min<uint32_t>(2160, uint32_t(std::lround(msh * hidpi_scale)));
+        const uint32_t msw = std::max<uint32_t>(640, uint32_t(std::lround(logical_w * kScales[i])) & ~1u);
+        const uint32_t msh = std::max<uint32_t>(360, uint32_t(std::lround(logical_h * kScales[i])) & ~1u);
+        const uint32_t mw = std::min<uint32_t>(max_w, uint32_t(std::lround(msw * hidpi_scale)) & ~1u);
+        const uint32_t mh = std::min<uint32_t>(max_h, uint32_t(std::lround(msh * hidpi_scale)) & ~1u);
         const size_t m = 0x9c + 28 * size_t(i);
         WriteBe32(&di[m + 0x00], mw);
         WriteBe32(&di[m + 0x04], mh);
@@ -2842,6 +2849,56 @@ struct SessionOptions {
     int settle_ms = 100;
     int toggle_settle_ms = 200;
 };
+
+// Maps a Frametop remote app token ("apple:physical", "apple:virtual", "apple:virtual@1",
+// "apple:virtual@2") and requested stream size into Apple Silicon H.264 virtual-display limits
+// (<= 4096x2304 backing pixels), preserving aspect ratio when clamping wider ultra-wide sizes
+// (e.g. 5120x1440 -> 4096x1152) and keeping 1x scaling when 2x would shrink height below 900 pts.
+inline void ResolveAppleDisplayMode(const std::string &app, int req_w, int req_h, SessionOptions *opt) {
+    if (app == "apple:physical") {
+        opt->virtual_display = false;
+        return;
+    }
+    opt->virtual_display = true;
+    double w = std::max(640, req_w);
+    double h = std::max(360, req_h);
+    if (w > 4096.0 || h > 2304.0) {
+        const double s = std::min(4096.0 / w, 2304.0 / h);
+        w *= s;
+        h *= s;
+    }
+    const int cw = std::clamp(int(std::lround(w)), 1280, 4096) & ~1;
+    const int ch = std::clamp(int(std::lround(h)), 720, 2304) & ~1;
+    if (app == "apple:virtual@1") {
+        opt->hidpi_scale = 1.0;
+        opt->logical_w = uint32_t(cw);
+        opt->logical_h = uint32_t(ch);
+        return;
+    }
+    if (app == "apple:virtual@2") {
+        opt->hidpi_scale = 2.0;
+        if (req_w <= 2048 && req_h <= 1152) {
+            opt->logical_w = uint32_t(std::clamp(req_w, 640, 2048) & ~1);
+            opt->logical_h = uint32_t(std::clamp(req_h, 360, 1152) & ~1);
+        } else {
+            opt->logical_w = uint32_t(std::max(640, (cw / 2) & ~1));
+            opt->logical_h = uint32_t(std::max(360, (ch / 2) & ~1));
+        }
+        return;
+    }
+    // Default "apple:virtual": 4K-tall modes (>= 2560x1800, e.g. 3840x2160 -> 1920x1080@2x) use
+    // 2x Retina; shorter or ultra-wide modes (e.g. 4096x1152 32:9, 3440x1440, 2560x1440, 1920x1080)
+    // use 1x so macOS keeps >= 1080 vertical points rather than shrinking UI height to 576-720p.
+    if (cw >= 2560 && ch >= 1800) {
+        opt->hidpi_scale = 2.0;
+        opt->logical_w = uint32_t((cw / 2) & ~1);
+        opt->logical_h = uint32_t((ch / 2) & ~1);
+    } else {
+        opt->hidpi_scale = 1.0;
+        opt->logical_w = uint32_t(cw);
+        opt->logical_h = uint32_t(ch);
+    }
+}
 
 struct ProbeInfo {
     std::string banner;
