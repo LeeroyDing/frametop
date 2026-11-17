@@ -2804,8 +2804,7 @@ private:
             return RecvExact(tcp_fd_, b, 22);
         }
         if (enc == 1109 || enc == 1010 || enc == 1011 || enc == 1002) {
-            // Length-prefixed Apple metadata: u16 or 0-byte pseudo-rects.
-            if (w == 0 && h == 0 && (enc == 1010 || enc == 1011 || enc == 1002)) return true;
+            // Length-prefixed Apple metadata: always carries a u16_be byte count.
             uint8_t lb[2];
             if (!RecvExact(tcp_fd_, lb, 2)) return false;
             const uint16_t n = ReadBe16(lb);
