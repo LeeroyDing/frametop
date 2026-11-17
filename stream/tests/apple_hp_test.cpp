@@ -815,11 +815,16 @@ void TestInputKeyMappingAndMetaHoldback() {
     const auto pe = BuildPointerEvent(0x05, 960, 540);
     CHECK(pe.size() == 6 && pe[0] == 0x05 && pe[1] == 0x05 && ReadBe16(&pe[2]) == 960 && ReadBe16(&pe[4]) == 540);
 
-    // 4K Retina backing (3840x2160) -> 1080p logical points (1920x1080)
-    CHECK(ScalePointerCoord(0.0, 3840, 1920) == 0);
-    CHECK(ScalePointerCoord(1920.0, 3840, 1920) == 960);
-    CHECK(ScalePointerCoord(3839.0, 3840, 1920) == 1919);
-    CHECK(ScalePointerCoord(9999.0, 3840, 1920) == 1919);
+    // ScreensharingAgent's hidpi_ConvertActualLocationsToVirtual expects backing ("Actual")
+    // pixel coordinates (e.g. 3840x2160 on 1920x1080@2x Retina) and divides by HiDPI scale
+    // on the host; when stream_dim != backing_dim (e.g. 5K backing over 4K stream), ScalePointerCoord
+    // scales into backing_dim and clamps to int16_t max (32767).
+    CHECK(ScalePointerCoord(0.0, 3840, 3840) == 0);
+    CHECK(ScalePointerCoord(1920.0, 3840, 3840) == 1920);
+    CHECK(ScalePointerCoord(3839.0, 3840, 3840) == 3839);
+    CHECK(ScalePointerCoord(9999.0, 3840, 3840) == 3839);
+    CHECK(ScalePointerCoord(3839.0, 3840, 5120) == 5119);
+    CHECK(ScalePointerCoord(40000.0, 40000, 40000) == 32767);
     CHECK(MouseButtonBit(0x110) == 0x01 && MouseButtonBit(0x112) == 0x02 && MouseButtonBit(0x111) == 0x04);
 
     // Verify Command vs Option keysym mapping matches ScreensharingAgent KeyMap.c:

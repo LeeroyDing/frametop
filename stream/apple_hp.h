@@ -1058,15 +1058,19 @@ inline std::vector<uint8_t> BuildPointerEvent(uint8_t button_mask, uint16_t x, u
     return out;
 }
 
-inline uint16_t ScalePointerCoord(double stream_px, uint32_t stream_dim, uint16_t logical_dim) {
-    if (logical_dim == 0) return 0;
+inline uint16_t ScalePointerCoord(double stream_px, uint32_t stream_dim, uint16_t backing_dim) {
+    if (backing_dim == 0) return 0;
+    const long max_coord = std::min<long>(long(backing_dim) - 1, 32767);
     if (stream_dim == 0) {
-        const long c = std::lround(stream_px);
-        return uint16_t(std::clamp<long>(c, 0, long(logical_dim) - 1));
+        return uint16_t(std::clamp<long>(std::lround(stream_px), 0, max_coord));
     }
     const double clamped = std::clamp(stream_px, 0.0, double(stream_dim - 1));
-    const double scaled = (clamped * double(logical_dim)) / double(stream_dim);
-    return uint16_t(std::clamp<long>(std::lround(scaled), 0, long(logical_dim) - 1));
+    if (stream_dim == backing_dim) {
+        return uint16_t(std::clamp<long>(std::lround(clamped), 0, max_coord));
+    }
+    const double denom = double(stream_dim > 1 ? stream_dim - 1 : 1);
+    const double scaled = (clamped * double(backing_dim - 1)) / denom;
+    return uint16_t(std::clamp<long>(std::lround(scaled), 0, max_coord));
 }
 
 inline uint8_t MouseButtonBit(uint32_t linux_btn) {
@@ -3043,11 +3047,18 @@ public:
     uint64_t video_rtp_bytes() const { return video_rtp_bytes_; }
     uint64_t audio_rtp_packets() const { return audio_rtp_pkts_; }
 
-    uint16_t logical_pointer_w() const {
-        return layout_.scaled_w ? layout_.scaled_w : server_w_;
+    // ScreensharingAgent's PostMouseEvent calls hidpi_ConvertActualLocationsToVirtual, which
+    // expects backing ("Actual") pixel coordinates (e.g. 3840x2160 on a 1920x1080@2x Retina
+    // display) and divides by the HiDPI scale factor on the Mac host.
+    uint16_t backing_pointer_w() const {
+        if (layout_.backing_w) return layout_.backing_w;
+        if (canvas_.width) return uint16_t(std::min<uint32_t>(canvas_.width, 32767));
+        return server_w_;
     }
-    uint16_t logical_pointer_h() const {
-        return layout_.scaled_h ? layout_.scaled_h : server_h_;
+    uint16_t backing_pointer_h() const {
+        if (layout_.backing_h) return layout_.backing_h;
+        if (canvas_.height) return uint16_t(std::min<uint32_t>(canvas_.height, 32767));
+        return server_h_;
     }
 
     // Verifies RSA1/SRP-6a (or non-SRP) credentials against screensharingd without mounting
@@ -3328,8 +3339,8 @@ public:
 
     bool SendPointerMove(double stream_x, double stream_y, uint32_t stream_w, uint32_t stream_h) {
         if (tcp_fd_ < 0) return false;
-        last_ptr_x_ = ScalePointerCoord(stream_x, stream_w, logical_pointer_w());
-        last_ptr_y_ = ScalePointerCoord(stream_y, stream_h, logical_pointer_h());
+        last_ptr_x_ = ScalePointerCoord(stream_x, stream_w, backing_pointer_w());
+        last_ptr_y_ = ScalePointerCoord(stream_y, stream_h, backing_pointer_h());
         return SendEncrypted(BuildPointerEvent(buttons_mask_, last_ptr_x_, last_ptr_y_));
     }
 

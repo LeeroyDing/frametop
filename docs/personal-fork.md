@@ -31,7 +31,7 @@ A stream that goes through the host's own address with route `auto` keeps checki
 
 ## Apple High Performance Screen Sharing
 
-An Apple Silicon Mac with Screen Sharing or Remote Management turned on (`screensharingd`, TCP and UDP port 5900) can stream directly to Frametop without Sunshine or Vibepollo. `stream/ft-appless.cpp` speaks Apple's High Performance Screen Sharing session (RFB 3.889 RSA1/SRP-6a Type 36 authentication, `enc1103` AES-128-CBC control channel, and `AVConference` H.264 + AAC-ELD 48 kHz stereo SRTP over UDP 5900), rewrites `pic_order_cnt_type` 0 to 2 before feeding `qcom-iris` (`/dev/video-dec0`) for zero-frame DPB hold, converts full-range BT.709 `Q08C` UBWC into `ft-screens`'s three-buffer RGBA UBWC ring, forwards scaled pointer, scroll, and keyboard input, and plays host audio through `libfdk-aac` and `libpulse-simple`.
+An Apple Silicon Mac with Screen Sharing or Remote Management turned on (`screensharingd`, TCP and UDP port 5900) can stream directly to Frametop without Sunshine or Vibepollo. `stream/ft-appless.cpp` speaks Apple's High Performance Screen Sharing session (RFB 3.889 RSA1/SRP-6a Type 36 authentication, `enc1103` AES-128-CBC control channel, and `AVConference` H.264 + AAC-ELD 48 kHz stereo SRTP over UDP 5900), rewrites `pic_order_cnt_type` 0 to 2 before feeding `qcom-iris` (`/dev/video-dec0`) for zero-frame DPB hold, converts full-range BT.709 `Q08C` UBWC into `ft-screens`'s three-buffer RGBA UBWC ring, forwards backing-pixel pointer, scroll, and keyboard input, and plays host audio through `libfdk-aac` and `libpulse-simple`.
 
 ```sh
 layout/ft-layout remote auth Space-Odysseus.local --login   # macOS user<NL>password on stdin -> 0600 ~/.local/share/frametop-stream/hosts/Space-Odysseus.local.apple
