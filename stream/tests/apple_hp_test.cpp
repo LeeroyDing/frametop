@@ -164,6 +164,31 @@ void TestBplistAndNegotiatorOffers() {
     NegotiatedCanvas canvas{};
     CHECK(ExtractCanvasDims(ans, &canvas));
     CHECK(canvas.width == 3840 && canvas.height == 2160 && canvas.tiles == 1);
+
+    // Verify macOS 26/27+ raw-zlib RFBMediaStreamMessage2 layout ([20B hdr][audio zlib][video1 zlib]).
+    std::vector<uint8_t> acfg, atop, az;
+    AppendPbVarint(acfg, 1, 0x55667788u);
+    AppendPbVarint(atop, 1, 1);
+    AppendPbBytes(atop, 3, acfg);
+    CHECK(ZlibCompress(atop, &az));
+
+    std::vector<uint8_t> vcfg, vtop, vz;
+    AppendPbVarint(vcfg, 1, 0x11223344u);
+    AppendPbVarint(vcfg, 4, 1920);
+    AppendPbVarint(vcfg, 5, 1080);
+    CHECK(ZlibCompress([&] {
+        AppendPbVarint(vtop, 1, 1);
+        AppendPbBytes(vtop, 5, vcfg);
+        return vtop;
+    }(), &vz));
+
+    std::vector<uint8_t> raw_ans = {0x00, 0x00, 0x00, 0x01};
+    raw_ans.resize(4 + 12 + 20, 0x00);
+    raw_ans.insert(raw_ans.end(), az.begin(), az.end());
+    raw_ans.insert(raw_ans.end(), vz.begin(), vz.end());
+    NegotiatedCanvas raw_canvas{};
+    CHECK(ExtractCanvasDims(raw_ans, &raw_canvas));
+    CHECK(raw_canvas.width == 1920 && raw_canvas.height == 1080 && raw_canvas.tiles == 1);
 }
 
 void TestSrpAndNonSrpAuth() {
