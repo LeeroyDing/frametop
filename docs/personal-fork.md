@@ -62,6 +62,12 @@ $R/hands/ft-camwatch --notify-test             # the notification and the notice
 
 The unit names a release folder, so write it again after a new release is installed.
 
+## Hand profile
+
+ft-hands keeps what it learns about the wearer's hands in `~/.local/state/frametop/hands/profile` (numbers only): hand size, bone lengths, where the palm search finds the hands, and how far apart the thumb and index read in a pinch. A new hand starts at the stored size, the stored bone lengths are the fit's starting guess until the session's own settle, and each save moves the stored values halfway to the session's. `hands/tracking.md` ("Hand profile") has the rules; `HANDS_PROFILE=0` turns it off and `ft-handsctl profile forget` deletes the file.
+
+Measured on one 45-second recording (2026-11-20): one-camera distance error in a new hand's first frames fell from 11.9% to 5.0%, with no change in skeleton fit. The search and pinch parts are unmeasured. Before proposing it upstream it needs handling for a second wearer, which this fork leaves out.
+
 ## Finding ft-screens' tools
 
 ft-screens starts `layout/ft-layout` (the reset button, `scale` after a move) from its own install folder. It now finds that folder once, at start. Before, it looked again for every run through `/proc/self/exe`, and once an update replaced the program on disk while it ran (`scripts/fast-install --no-restart`), that path named a deleted file. Every reset button press then did nothing, with nothing logged, until the desktop restarted.
