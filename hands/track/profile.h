@@ -46,6 +46,16 @@ struct Side {
     int settled() const;              // how many of the quantities have kSettle samples or more
 };
 
+// The shape a side's fit starts from (skel::Skeleton::set_prior): only when all its quantities
+// had settled, else false and the fit starts as it did without a profile.
+bool prior_shape(const Side &s, skel::Shape &out);
+// What a run adds to the profile: each value this run settled is averaged with the profile's
+// (half each), or taken as it is when the profile had none; the rest stay as they were. So one
+// run moves the profile halfway to it, and no single short or odd run decides it. The first
+// live test (2026-11-20) learned bone lengths in 45 s that, taken as settled the next time,
+// fitted a recording worse (90th percentile 25.0 mm against 19.7 learned afresh).
+void merge(const Side &before, const Side &run, Side &out);
+
 // One of the palm search's tiles (Tracker::Tile): how often the search's rotation tried it while no
 // tracked hand was in it, and how often that found a hand. Where this wearer's hands come into
 // view and rest shows up as tiles that find more than the others.

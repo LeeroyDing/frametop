@@ -639,7 +639,7 @@ int main(int argc, char **argv) {
                     1000 * now_p.dip_max_m);
         pinch.set_learned(l.begin_m, l.dip_max_m);
     };
-    profile::Profile prof;
+    profile::Profile prof, loaded;   // loaded: as the file was at the start (what a save merges this run into)
     std::string prof_text;   // what the file holds
     int prof_saves = 0;
     if (profiling) {
@@ -647,8 +647,10 @@ int main(int argc, char **argv) {
         std::string perr;
         if (!profile::load(profile_path, prof, perr)) std::printf("hand profile: %s: learning afresh\n", perr.c_str());
         tracker.set_user_scale(true);
+        loaded = prof;
         for (int s = 0; s < 2; ++s) {
-            tracker.skeleton().calibration(s).seed(prof.side[s].q, prof.side[s].n);
+            skel::Shape sh;
+            if (profile::prior_shape(prof.side[s], sh)) tracker.skeleton().set_prior(s, sh);
             tracker.seed_user_scale(s, prof.side[s].scale);
         }
         if (profile_search) {
@@ -678,8 +680,10 @@ int main(int argc, char **argv) {
     auto save_profile = [&] {
         if (!profiling) return;
         for (int s = 0; s < 2; ++s) {
-            tracker.skeleton().calibration(s).quantities(prof.side[s].q, prof.side[s].n);
-            prof.side[s].scale = tracker.user_scale(s);
+            profile::Side run;
+            tracker.skeleton().calibration(s).quantities(run.q, run.n);
+            run.scale = tracker.user_scale(s);
+            profile::merge(loaded.side[s], run, prof.side[s]);
         }
         if (profile_search) {
             prof.tiles = tracker.tile_stats();

@@ -312,17 +312,8 @@ void Calibration::add(const V3 local[21], const bool ok[21], const bool finger_o
             }
         } else if (std::fabs(x[k] - est_[k]) < 0.3 * std::fabs(est_[k]) + 0.003) {
             est_[k] += std::clamp(x[k] - est_[k], -2e-5, 2e-5);   // a running median, at most 0.02 mm a sample
-            n_[k] += n_[k] < kMaxSamples;   // a profile carries the count from run to run
+            n_[k] += n_[k] < kMaxSamples;
         }
-    }
-}
-
-void Calibration::seed(const double q[kQuantities], const int n[kQuantities]) {
-    for (int k = 0; k < kQuantities; ++k) {
-        if (n[k] < kSettle || !std::isfinite(q[k])) continue;
-        est_[k] = q[k], n_[k] = std::min(n[k], kMaxSamples);
-        buf_[k].clear();
-        buf_[k].shrink_to_fit();
     }
 }
 
@@ -364,6 +355,7 @@ Shape Skeleton::canonical(double scale) {
 
 Shape Skeleton::shape(int side, double scale) const {
     const Calibration &me = cal_[side > 0], &other = cal_[side <= 0];
+    if (has_prior_[side > 0]) return me.shape(prior_[side > 0]);   // the wearer's, from a profile
     // the other hand, when it knows more: left and right hands are mirror images
     const Shape prior = other.settled() > me.settled() ? other.shape(canonical(scale)) : canonical(scale);
     return me.shape(prior);

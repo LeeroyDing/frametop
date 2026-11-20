@@ -35,6 +35,27 @@ int Side::settled() const {
     return count;
 }
 
+bool prior_shape(const Side &s, skel::Shape &out) {
+    if (s.settled() < skel::kQuantities) return false;
+    out = skel::Shape{};
+    out.from_quantities(s.q);
+    return true;
+}
+
+void merge(const Side &before, const Side &run, Side &out) {
+    Side m = before;
+    for (int k = 0; k < skel::kQuantities; ++k) {
+        if (run.n[k] < skel::Calibration::kSettle || !plausible(k, run.q[k])) continue;
+        m.q[k] = before.n[k] >= skel::Calibration::kSettle ? 0.5 * (before.q[k] + run.q[k]) : run.q[k];
+        m.n[k] = int(std::min(long(before.n[k]) + run.n[k], kMaxSamples));
+    }
+    if (run.scale.settled() && run.scale.value >= kScaleMin && run.scale.value <= kScaleMax) {
+        m.scale.value = before.scale.settled() ? 0.5 * (before.scale.value + run.scale.value) : run.scale.value;
+        m.scale.n = std::min(before.scale.n + run.scale.n, kMaxSamples);
+    }
+    out = m;
+}
+
 bool Profile::empty() const {
     for (const Side &s : side)
         if (s.scale.n > 0 || s.settled() > 0) return false;

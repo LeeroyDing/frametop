@@ -353,16 +353,18 @@ int main(int argc, char **argv) {
     // The hand profile (track/profile.h), off unless asked for so old replays repeat. --profile
     // FILE starts from one, as ft-hands starts from the wearer's; --profile-out FILE writes what
     // this replay learned. A replay into a file and a second one from it are the before and after.
+    profile::Profile loaded;   // the --profile one, which --profile-out merges this replay into
     if (!profile_in.empty() || !profile_out.empty()) {
         tracker.set_user_scale(true);
         tracker.set_tile_learning(true);
         if (!profile_in.empty()) {
-            profile::Profile prof;
+            profile::Profile &prof = loaded;
             std::string perr;
             if (!profile::load(profile_in, prof, perr) || prof.empty())
                 return std::fprintf(stderr, "--profile %s: %s\n", profile_in.c_str(), perr.empty() ? "no profile there" : perr.c_str()), 1;
             for (int s = 0; s < 2; ++s) {
-                tracker.skeleton().calibration(s).seed(prof.side[s].q, prof.side[s].n);
+                skel::Shape sh;
+                if (profile::prior_shape(prof.side[s], sh)) tracker.skeleton().set_prior(s, sh);
                 tracker.seed_user_scale(s, prof.side[s].scale);
                 std::printf("hand profile: %s size %.2f (%ld frames), shape %d/%d settled\n", s ? "right" : "left ",
                             prof.side[s].scale.value, prof.side[s].scale.n, prof.side[s].settled(), skel::kQuantities);
@@ -943,10 +945,12 @@ int main(int argc, char **argv) {
         std::printf("\n");
     }
     if (!profile_out.empty()) {
-        profile::Profile prof;
+        profile::Profile prof = loaded;
         for (int s = 0; s < 2; ++s) {
-            tracker.skeleton().calibration(s).quantities(prof.side[s].q, prof.side[s].n);
-            prof.side[s].scale = tracker.user_scale(s);
+            profile::Side run;
+            tracker.skeleton().calibration(s).quantities(run.q, run.n);
+            run.scale = tracker.user_scale(s);
+            profile::merge(loaded.side[s], run, prof.side[s]);
         }
         prof.tiles = tracker.tile_stats();
         std::string perr;

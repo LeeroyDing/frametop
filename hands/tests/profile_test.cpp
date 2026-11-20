@@ -95,31 +95,47 @@ int main() {
         CHECK(back.side[0].n[k] == p.side[0].n[k]);
     }
 
-    // --- the next run: seeded, it starts settled, on the same hand, and goes on learning
+    // --- the next run: the profile's shape is the fit's until this run's own settles
     {
-        Calibration next;
-        CHECK(next.settled() == 0.0);
-        next.seed(back.side[1].q, back.side[1].n);
-        CHECK(next.settled() == 1.0);
-        // the prior (the model's average hand) no longer shows: this is the wearer's from frame 1
-        CHECK(biggest_difference(next.shape(Skeleton::canonical(1.0)), truth_r) < 1e-5);
-        feed(next, 1.30, 100);   // a bigger hand: each quantity at most 0.02 mm a sample toward it
-        const double moved = biggest_difference(next.shape(Skeleton::canonical(1.0)), truth_r);
-        CHECK(moved > 1e-4 && moved < std::sqrt(3.0) * 100 * 2e-5 + 1e-5);   // a palm point is 3 quantities
-        int n[kQuantities];
-        double q[kQuantities];
-        next.quantities(q, n);
-        CHECK(n[20] == back.side[1].n[20] + 100);   // the count carries on from the profile's
-    }
-    // a profile with only some quantities settled seeds those, and the rest are learned as before
-    {
+        Skeleton sk;
+        CHECK(biggest_difference(sk.shape(1, 1.0), Skeleton::canonical(1.0)) < 1e-12);   // no profile: the average hand
+        skel::Shape prior;
+        CHECK(profile::prior_shape(back.side[1], prior));
+        sk.set_prior(1, prior);
+        CHECK(biggest_difference(sk.shape(1, 1.0), truth_r) < 1e-5);   // the wearer's from frame 1
+        CHECK(biggest_difference(sk.shape(-1, 1.0), Skeleton::canonical(1.0)) < 1e-12);   // only the side it was given
+        feed(sk.calibration(1), 1.30, 10);    // a few samples of a bigger hand: still mostly the profile's
+        const double early = biggest_difference(sk.shape(1, 1.0), truth_r);
+        CHECK(early > 1e-4 && early < biggest_difference(Skeleton::canonical(1.30), truth_r) * 0.6);
+        feed(sk.calibration(1), 1.30, 35);    // settled: this run's own, as without a profile
+        CHECK(biggest_difference(sk.shape(1, 1.0), Skeleton::canonical(1.30)) < 1e-6);
+        // a side that hadn't settled every quantity gives no prior
         profile::Side partial = back.side[0];
-        for (int k = 15; k < kQuantities; ++k) partial.n[k] = 10;
-        Calibration next;
-        next.seed(partial.q, partial.n);
-        CHECK(next.settled() == 0.0 && next.samples(0) >= Calibration::kSettle && next.samples(20) == 0);
-        feed(next, 1.18, 45);
-        CHECK(next.settled() == 1.0);
+        partial.n[20] = 10;
+        CHECK(!profile::prior_shape(partial, prior) && !profile::prior_shape(profile::Side{}, prior));
+    }
+    // --- what a run adds: halfway to it where both had settled, all of it where the profile had none
+    {
+        Calibration run_cal;
+        feed(run_cal, 1.30, 60);
+        profile::Side run = side_of(run_cal, 1.30, 900), merged;
+        profile::merge(back.side[1], run, merged);
+        const double want = 0.5 * (back.side[1].q[20] + run.q[20]);
+        CHECK(std::fabs(merged.q[20] - want) < 1e-12 && merged.n[20] == back.side[1].n[20] + run.n[20]);
+        CHECK(std::fabs(merged.scale.value - 0.5 * (1.2204 + 1.30)) < 1e-9 && merged.scale.n == 6120 + 900);
+        profile::merge(profile::Side{}, run, merged);   // a first run: taken as it is
+        CHECK(merged.q[20] == run.q[20] && merged.scale.value == 1.30);
+        profile::Side unsettled = run;                  // a run that settled nothing changes nothing
+        for (int k = 0; k < kQuantities; ++k) unsettled.n[k] = 20;
+        unsettled.scale.n = 10;
+        profile::merge(back.side[1], unsettled, merged);
+        bool same = merged.scale.value == back.side[1].scale.value && merged.scale.n == back.side[1].scale.n;
+        for (int k = 0; k < kQuantities; ++k) same = same && merged.q[k] == back.side[1].q[k] && merged.n[k] == back.side[1].n[k];
+        CHECK(same);
+        profile::Side wild = run;                       // nor one with a bone no hand has
+        wild.q[20] = 0.5;
+        profile::merge(back.side[1], wild, merged);
+        CHECK(merged.q[20] == back.side[1].q[20] && merged.q[21] != back.side[1].q[21]);
     }
 
     // --- the search's tiles: more where hands turn up, never none
