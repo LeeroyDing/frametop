@@ -111,17 +111,24 @@ void PinchObserver::update(int s, int64_t t_ns, double d, bool down, bool began,
     if (began) {
         pending_[s].clear();   // those were the fingers closing, not a hand at rest
         low_[s] = d >= 0 ? d : 1;
+        begin_ns_[s] = t_ns;
     }
     if (down && d >= 0) low_[s] = std::min(low_[s], d);
     if (ended || lost) {
         if (ended && !lost && low_[s] < 1) {
-            stat[s].taps[bin_of(low_[s])] += 1;
-            halve_past(stat[s].taps, kTapsForget);
+            if (confirm) {
+                waiting_[s].push_back({begin_ns_[s], t_ns, low_[s]});
+                while (waiting_[s].size() > 16) waiting_[s].pop_front(), ++unanswered;
+            } else {
+                stat[s].taps[bin_of(low_[s])] += 1;
+                halve_past(stat[s].taps, kTapsForget);
+            }
         }
         low_[s] = 1;
         quiet_until_[s] = t_ns + clear;   // nor the fingers opening again
         pending_[s].clear();
     }
+    if (confirm) settle(s, t_ns);
     if (d < 0) {
         pending_[s].clear();   // the hand went: what it was doing just before isn't known
         return;
@@ -137,6 +144,38 @@ void PinchObserver::update(int s, int64_t t_ns, double d, bool down, bool began,
         pending_[s].push_back({t_ns, d});
         last_idle_[s] = t_ns;
     }
+}
+
+void PinchObserver::verdict(int s, int64_t begin_ns, bool done, int64_t now_ns) {
+    if (s < 0 || s > 1 || begin_ns <= 0) return;
+    heard_[s].push_back({begin_ns, now_ns, done});
+    while (heard_[s].size() > 64) heard_[s].pop_front();
+    settle(s, now_ns);
+}
+
+void PinchObserver::settle(int s, int64_t now_ns) {
+    for (auto w = waiting_[s].begin(); w != waiting_[s].end();) {
+        const auto h = std::find_if(heard_[s].begin(), heard_[s].end(), [&](const Heard &x) { return x.begin_ns == w->begin_ns; });
+        if (h != heard_[s].end()) {
+            if (h->done) {
+                stat[s].taps[bin_of(w->low)] += 1;
+                halve_past(stat[s].taps, kTapsForget);
+                ++confirmed;
+            } else {
+                ++refused;
+            }
+            heard_[s].erase(h);
+            w = waiting_[s].erase(w);
+        } else if (now_ns - w->ended_ns > int64_t(kVerdictWait * 1e9)) {
+            ++unanswered;
+            w = waiting_[s].erase(w);
+        } else {
+            ++w;
+        }
+    }
+    // a verdict waits as long for its pinch to end: one held back as it began comes first
+    const int64_t keep = int64_t(4 * kVerdictWait * 1e9);
+    while (!heard_[s].empty() && now_ns - heard_[s].front().t_ns > keep) heard_[s].pop_front();
 }
 
 double mean_rate(const std::map<std::string, std::vector<TileStat>> &tiles) {

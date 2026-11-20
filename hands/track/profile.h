@@ -114,7 +114,31 @@ public:
     // Past kTapsForget taps or kIdleForget idle samples on a side, its counts are halved.
     static constexpr double kTapsForget = 5000, kIdleForget = 200000;
 
+    // With confirm on (ft-hands live), a pinch that ended counts only once the pointer helper says
+    // it did something: a click, a press, a drag or a scroll (hands/include/fh_verdicts.h). Its
+    // rules know a typing hand, a hand on a controller or a stroke that closed the fingers on the
+    // way, which ft-hands doesn't; a pinch it held back doesn't count, nor one it never answered
+    // within kVerdictWait (one left to ft-screens, or no helper running). Off (the default), every
+    // pinch that ended by opening counts. verdict() takes the helper's answers, by the pinch's
+    // begin time (the capture time update() saw it begin at); one can come before the pinch ends.
+    bool confirm = false;
+    static constexpr double kVerdictWait = 3.0;
+    void verdict(int side, int64_t begin_ns, bool done, int64_t now_ns);
+    int confirmed = 0, refused = 0, unanswered = 0;   // ended pinches by what became of them, for the log
+
 private:
+    void settle(int side, int64_t now_ns);
+    int64_t begin_ns_[2] = {0, 0};
+    struct Waiting {
+        int64_t begin_ns, ended_ns;
+        double low;
+    };
+    struct Heard {
+        int64_t begin_ns, t_ns;
+        bool done;
+    };
+    std::deque<Waiting> waiting_[2];   // ended, waiting for their verdict
+    std::deque<Heard> heard_[2];       // verdicts not matched to an ended pinch yet
     double low_[2] = {1, 1};
     int64_t quiet_until_[2] = {0, 0}, last_idle_[2] = {0, 0};
     std::deque<std::pair<int64_t, double>> pending_[2];   // idle samples a pinch may yet claim as its approach

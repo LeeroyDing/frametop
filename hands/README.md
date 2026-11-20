@@ -68,6 +68,7 @@ Files, all in `/run/user/UID/frametop-hands/` (private to the user; not `/run/us
 | --- | --- | --- | --- |
 | `cam-ring` | ft-camd | `camd/fhring.h` | ft-hands, `tools/ring.py` |
 | `hands` | ft-hands | `include/fh_hands.h` (version 2: version 1, then a skeleton per hand) | ft-screens (`screens/handcut.cpp`, version 1's part), the hand recorder (`rec/session.py`) |
+| `verdicts` | the pointer helper | `include/fh_verdicts.h`: what it did with each pinch | ft-hands (the hand profile's pinch, [tracking.md](tracking.md#hand-profile)) |
 | `gestures` | ft-hands | `include/fh_gestures.h` | the pointer helper (`pointer/helper/ft-pointer.cpp`), `tools/watch_gestures.py` |
 | `flag` | `ft-handsctl flag` (`handsflag.py`) | key=value lines: `dir`, `note`, `flag_unix`, `said_unix` | ft-hands, which removes it when it takes it |
 

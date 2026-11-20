@@ -31,8 +31,9 @@ constexpr double kMonoDepthGain = 0.1;
 // (5-95%, median 1.16); pairs of two different hands mostly far less.
 constexpr double kSizePrior = 1.16, kRatioLo = 0.6, kRatioHi = 1.9;
 // The wearer's hand size (Tracker::user_scale) moves at most this far a clean stereo frame once
-// it has settled: 0.05 in 100 frames, so a few seconds of someone else's hands hardly show.
-constexpr double kUserScaleStep = 0.0005;
+// it has settled: 0.005 in 100 frames (about 3 s of a moving hand). 0.0005 until 2026-11-20 let
+// it swing between 1.16 and 1.34 within minutes live, which is the per-frame reading's own noise.
+constexpr double kUserScaleStep = 0.00005;
 
 double ms_since(std::chrono::steady_clock::time_point t) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();

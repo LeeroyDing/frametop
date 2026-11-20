@@ -62,6 +62,8 @@
 // offline tools. The request is run_dir/flag (key=value lines: dir, note, said_unix, flag_unix),
 // checked 4 times a second and removed when taken; the folder's manifest.json is written last.
 #include "../../conf/ft_conf.h"
+#include "../include/fh_shm.hpp"
+#include "../include/fh_verdicts.h"
 #include "flagbuf.h"
 #include "io.h"
 #include "pinch.h"
@@ -82,6 +84,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <optional>
@@ -622,6 +625,23 @@ int main(int argc, char **argv) {
     const bool profiling = track && profile_on && (publish || !profile_path.empty());
     profile_pinch = profile_pinch && profiling && gestures_on;
     profile::PinchObserver pinch_seen;   // the wearer's pinches, for the profile
+    // ...only the ones the pointer helper turned into a click, a press, a drag or a scroll
+    // (hands/include/fh_verdicts.h). With no helper writing verdicts, no pinch counts.
+    pinch_seen.confirm = true;
+    fh::ShmFile verdicts_file(FH_VERDICTS_FILE, FH_VERDICTS_MAGIC, offsetof(fh_verdicts_t, ring));
+    uint64_t verdicts_seen = 0;
+    int verdicts_opens = 0;
+    auto read_verdicts = [&](int64_t now_ns) {
+        fh_verdicts_t v;
+        if (!verdicts_file.Read(&v, sizeof v, offsetof(fh_verdicts_t, seq))) return;
+        if (verdicts_file.opens != verdicts_opens || v.count < verdicts_seen) verdicts_seen = 0, verdicts_opens = verdicts_file.opens;
+        const uint64_t from = std::max(verdicts_seen, v.count > FH_VERDICTS_RING ? v.count - FH_VERDICTS_RING : uint64_t(0));
+        for (uint64_t i = from; i < v.count; ++i) {
+            const fh_verdict_t &r = v.ring[i % FH_VERDICTS_RING];
+            if (r.kind == 0) pinch_seen.verdict(r.side, int64_t(r.begin_ns), r.outcome == FH_VERDICT_DONE, now_ns);
+        }
+        verdicts_seen = v.count;
+    };
     // The pinch detector's distances moved to the wearer's pinches (profile::learned_pinch): at the
     // start, and each time the profile is saved. The ones it was started with are where it moves from.
     auto learn_pinch = [&, begin0 = pinch_params.begin_m, dip0 = pinch_params.dip_max_m] {
@@ -631,7 +651,7 @@ int main(int argc, char **argv) {
         const profile::PinchLearned l = profile::learned_pinch(both, begin0, dip0);
         const PinchParams &now_p = pinch.params();
         if (std::fabs(l.begin_m - now_p.begin_m) < 0.0005 && std::fabs(l.dip_max_m - now_p.dip_max_m) < 0.0005) return;
-        std::printf("hand profile: from %.0f of this wearer's pinches (80%% reach under %.0f mm, 97%% under %.0f mm) and an idle "
+        std::printf("hand profile: from %.0f of this wearer's pinches that clicked (80%% reach under %.0f mm, 97%% under %.0f mm) and an idle "
                     "hand's distances (1%% under %.0f mm): a pinch begins under %.0f mm (%.0f before), a dip counts under %.0f mm "
                     "(%.0f before)\n",
                     both.tap_n(), 1000 * profile::quantile(both.taps, 0.80), 1000 * profile::quantile(both.taps, 0.97),
@@ -1215,6 +1235,7 @@ int main(int argc, char **argv) {
             holding.insert(holding.end(), held2.begin(), held2.end());
             grip.update(hands, views, int64_t(capture), holding);
             pinch.update(hands, views, int64_t(capture), grip.gripping(), middle.down());
+            if (profile_pinch) read_verdicts(int64_t(capture));
             if (profile_pinch)
                 for (int s = 0; s < 2; ++s) {
                     bool began = false, ended = false, lost = false;
@@ -1310,11 +1331,12 @@ int main(int argc, char **argv) {
                 for (const auto &[cam, stats] : tracker.tile_stats())
                     for (const profile::TileStat &t : stats) tries += t.tries, finds += t.finds;
                 std::printf("        hand profile: size left %.2f right %.2f (new hands start at %.2f)  shape settled left %.0f%% "
-                            "right %.0f%%  search %.0f finds in %.0f tries  pinches %.0f (begin under %.0f mm, dips under %.0f mm)  "
-                            "saved %d time(s)\n",
+                            "right %.0f%%  search %.0f finds in %.0f tries  pinches %.0f (this run: %d clicked, %d held back, %d unanswered; "
+                            "begin under %.0f mm, dips under %.0f mm)  saved %d time(s)\n",
                             tracker.user_scale(0).value, tracker.user_scale(1).value, tracker.start_scale(),
                             100 * tracker.skeleton().calibration(0).settled(), 100 * tracker.skeleton().calibration(1).settled(),
-                            finds, tries, pinch_seen.stat[0].tap_n() + pinch_seen.stat[1].tap_n(), 1000 * pinch.params().begin_m,
+                            finds, tries, pinch_seen.stat[0].tap_n() + pinch_seen.stat[1].tap_n(), pinch_seen.confirmed,
+                            pinch_seen.refused, pinch_seen.unanswered, 1000 * pinch.params().begin_m,
                             1000 * pinch.params().dip_max_m, prof_saves);
             }
             if (gestures_on) {

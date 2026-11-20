@@ -19,7 +19,7 @@ LDFLAGS  ?=
 
 CAMD  = camd/camd.c camd/tp.c camd/xrcams.c
 TRACK = track/calib.cpp track/nets.cpp track/tracker.cpp track/io.cpp track/record.cpp track/pinch.cpp track/sides.cpp track/skeleton.cpp track/flagbuf.cpp track/profile.cpp
-HDR   = $(wildcard track/*.h) camd/fhring.h include/fh_hands.h include/fh_gestures.h ../conf/ft_conf.h
+HDR   = $(wildcard track/*.h) camd/fhring.h include/fh_hands.h include/fh_gestures.h include/fh_verdicts.h include/fh_shm.hpp ../conf/ft_conf.h
 
 all: build/ft-camd build/ft-hands
 tools: build/ft-handreplay build/ft-ringplay
@@ -44,7 +44,7 @@ build/skeleton-test: tests/skeleton_test.cpp track/skeleton.cpp track/skeleton.h
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/skeleton_test.cpp track/skeleton.cpp
 
-build/profile-test: tests/profile_test.cpp track/profile.cpp track/profile.h track/skeleton.cpp track/skeleton.h track/geom.h
+build/profile-test: tests/profile_test.cpp track/profile.cpp track/profile.h track/skeleton.cpp track/skeleton.h track/geom.h include/fh_verdicts.h include/fh_shm.hpp
 	@mkdir -p build
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ tests/profile_test.cpp track/profile.cpp track/skeleton.cpp
 

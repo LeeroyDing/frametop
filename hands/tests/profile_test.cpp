@@ -2,7 +2,11 @@
 // implausible file does no harm, and a calibration seeded from one starts settled and goes on
 // learning. No models, no recordings, no cameras. make check (in the dev container) builds and
 // runs it.
+#include "../include/fh_shm.hpp"
+#include "../include/fh_verdicts.h"
 #include "../track/profile.h"
+
+#include <cstddef>
 
 #include <cmath>
 #include <cstdio>
@@ -255,6 +259,66 @@ int main() {
         std::string negative = "format 1\ntaps left";
         for (int b = 0; b < profile::kPinchBins; ++b) negative += b == 7 ? " -1" : " 0";
         CHECK(profile::parse(negative + "\n", read) == 0);
+    }
+
+    // --- with confirm, a pinch counts only once the pointer helper says it did something
+    {
+        profile::PinchObserver seen;
+        seen.confirm = true;
+        const int64_t ms = 1'000'000;
+        int64_t t = 10'000 * ms;
+        auto tap = [&](double low, int64_t at) {   // a quick tap at `at`: begins, bottoms out, ends 60 ms later
+            seen.update(1, at, 0.019, true, true, false, false);
+            seen.update(1, at + 30 * ms, low, true, false, false, false);
+            seen.update(1, at + 60 * ms, 0.050, false, false, true, false);
+            return at;
+        };
+        const int64_t a = tap(0.012, t);
+        CHECK(seen.stat[1].tap_n() == 0);                     // ended, but no verdict yet
+        seen.verdict(1, a, true, a + 80 * ms);                // the helper clicked: it counts
+        CHECK(seen.stat[1].tap_n() == 1 && seen.stat[1].taps[12] == 1 && seen.confirmed == 1);
+        const int64_t b = tap(0.025, t + 1000 * ms);
+        seen.verdict(1, b, false, b + 80 * ms);               // held back (typing, say): it doesn't
+        CHECK(seen.stat[1].tap_n() == 1 && seen.refused == 1);
+        const int64_t c = t + 2000 * ms;
+        seen.verdict(1, c, false, c + 5 * ms);                // ignored as it began, before it ended
+        tap(0.022, c);
+        CHECK(seen.stat[1].tap_n() == 1 && seen.refused == 2);
+        const int64_t d = tap(0.015, t + 3000 * ms);
+        seen.verdict(1, d + 1, true, d + 80 * ms);            // a verdict for some other pinch: no match
+        seen.verdict(0, d, true, d + 80 * ms);                // nor one for the other side
+        CHECK(seen.stat[1].tap_n() == 1);
+        seen.update(1, d + 3100 * ms, 0.06, false, false, false, false);   // no answer within 3 s: dropped
+        CHECK(seen.stat[1].tap_n() == 1 && seen.unanswered == 1);
+        seen.verdict(1, d, true, d + 3200 * ms);              // too late: it was dropped
+        CHECK(seen.stat[1].tap_n() == 1);
+        // the pinch a grip or a lost hand ended waits for nothing
+        seen.update(1, t + 9000 * ms, 0.015, true, true, false, false);
+        seen.update(1, t + 9030 * ms, -1, false, false, false, true);
+        seen.update(1, t + 13000 * ms, 0.06, false, false, false, false);
+        CHECK(seen.unanswered == 1 && seen.confirmed == 1 && seen.refused == 2);
+    }
+
+    // --- the verdicts file: written by the helper's side, read by ft-hands' (fh_shm.hpp)
+    {
+        char dir[] = "/tmp/ft-verdicts-test-XXXXXX";
+        CHECK(mkdtemp(dir) != nullptr);
+        fh::ShmFile file(FH_VERDICTS_FILE, FH_VERDICTS_MAGIC, offsetof(fh_verdicts_t, ring), dir,
+                         std::chrono::seconds(0));   // look again every read (live: once a second)
+        fh_verdicts_t v;
+        CHECK(!file.Read(&v, sizeof v, offsetof(fh_verdicts_t, seq)));   // none yet
+        for (int i = 1; i <= 40; ++i) fh_verdict(dir, i % 2, 0, i % 3 ? FH_VERDICT_DONE : FH_VERDICT_REFUSED, uint64_t(i) * 1000);
+        fh_verdict(dir, 2, 0, FH_VERDICT_DONE, 5);   // not a side: not written
+        fh_verdict(dir, 0, 0, FH_VERDICT_DONE, 0);   // no gesture: not written
+        CHECK(file.Read(&v, sizeof v, offsetof(fh_verdicts_t, seq)));
+        CHECK(v.count == 40 && v.version == FH_VERDICTS_VERSION && v.seq % 2 == 0);
+        const fh_verdict_t &newest = v.ring[(v.count - 1) % FH_VERDICTS_RING], &oldest = v.ring[v.count % FH_VERDICTS_RING];
+        CHECK(newest.begin_ns == 40000 && newest.side == 0 && newest.outcome == FH_VERDICT_DONE);
+        CHECK(oldest.begin_ns == 9000 && oldest.outcome == FH_VERDICT_REFUSED);   // the 9th: the 8 before are gone
+        struct stat st;
+        CHECK(stat((std::string(dir) + "/" FH_VERDICTS_FILE).c_str(), &st) == 0 && (st.st_mode & 0777) == 0600);
+        unlink((std::string(dir) + "/" FH_VERDICTS_FILE).c_str());
+        rmdir(dir);
     }
 
     // --- damage does no harm
