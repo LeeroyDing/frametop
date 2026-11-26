@@ -170,6 +170,52 @@ class RemoteAppleTest(unittest.TestCase):
         self.assertEqual(self.hosts(), [])
         self.assertEqual(self.stream_calls, [])
 
+    def test_remote_anchor_uses_screen_1_room_anchor_even_when_head_turned(self):
+        self.m.save_layout({
+            "mode": "custom",
+            "screens": [{
+                "size": [3840, 2160],
+                "pos": [1.712, 0.0, 0.824],
+                "face": [-115.7, 0.0],
+                "roll": 0.0,
+                "metres": 2.8,
+                "curve": 1.9,
+            }],
+            "hosts": [],
+        })
+        layout = self.m.load_layout()
+
+        class FakeSock:
+            def __init__(self, hand="none", head="ok 0.5 1.6 -0.2 -95.0"):
+                self.hand = hand
+                self.head = head
+                self.asked = []
+
+            def ask(self, text, timeout=10.0):
+                self.asked.append(text)
+                if text == "get 1":
+                    return ("ok 1.7120 1.6500 0.8240  "
+                            "-0.43366 0.00000 0.90108  "
+                            "0.00000 1.00000 0.00000  "
+                            "-0.90108 0.00000 -0.43366  "
+                            f"2.8000 1.5750 1.900 {self.hand}")
+                if text == "head":
+                    return self.head
+                return "ok"
+
+        sock = FakeSock(hand="none", head="ok 0.5 1.6 -0.2 -95.0")
+        eye, heading = self.m.remote_anchor(sock, layout)
+        self.assertAlmostEqual(eye[0], 0.0, places=3)
+        self.assertAlmostEqual(eye[1], 1.65, places=3)
+        self.assertAlmostEqual(eye[2], 0.0, places=3)
+        self.assertAlmostEqual(heading, 0.0, places=2)
+        self.assertNotIn("head", sock.asked)
+
+        pinned_sock = FakeSock(hand="left", head="ok 0.5 1.6 -0.2 -95.0")
+        eye2, heading2 = self.m.remote_anchor(pinned_sock, layout)
+        self.assertEqual(eye2, (0.5, 1.6, -0.2))
+        self.assertEqual(heading2, -95.0)
+
 
 if __name__ == "__main__":
     unittest.main()

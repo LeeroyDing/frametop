@@ -1337,9 +1337,17 @@ def slug(text):
 
 
 def remote_anchor(sock, layout):
-    """(eye, heading) to place remote displays from: the head, or with no head pose (the
-    headset off), where the last arrangement was made from, worked out from where screen 1
-    is and where the layout puts it."""
+    """(eye, heading) to place remote displays from: when the desktop has screens, work it out
+    from where screen 1 sits and where the layout puts it, so a late remote connect stays in
+    the room's arrangement even if the head has turned toward another screen. Fall back to the
+    live head pose (streams only, or screen 1 pinned/missing), or stored_anchor() with no head."""
+    if native_count(layout):
+        try:
+            anchor = inferred_anchor(layout, parse_get(sock.ask("get 1")))
+            if anchor is not None:
+                return anchor
+        except RuntimeError:
+            pass
     try:
         f = sock.ask("head").split()
         return tuple(map(float, f[1:4])), float(f[4])
@@ -1349,10 +1357,7 @@ def remote_anchor(sock, layout):
             if anchor is None:
                 raise RuntimeError("no head pose, and nothing arranged yet")
             return anchor
-        anchor = inferred_anchor(layout, parse_get(sock.ask("get 1")))
-        if anchor is None:
-            raise RuntimeError("no head pose, and screen 1 is pinned")
-        return anchor
+        raise RuntimeError("no head pose, and screen 1 is pinned")
 
 
 def start_remotes_now(layout, only):
