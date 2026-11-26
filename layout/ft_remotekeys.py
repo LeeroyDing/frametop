@@ -87,8 +87,8 @@ def canonical_key_name(raw, allow_none=False):
     raise ValueError(f"unknown key {raw!r}")
 
 
-def apply_keyboard_kv(target, key, value):
-    """Applies kb_layout=... or keymap=... onto a host or display dict."""
+def apply_keyboard_kv(target, key, value, *, inherit_view_only=False):
+    """Applies kb_layout=..., keymap=..., or view_only=... onto a host or display dict."""
     if key == "kb_layout":
         norm = value.strip().lower().replace("_", "-")
         if not norm or norm == "none":
@@ -116,6 +116,21 @@ def apply_keyboard_kv(target, key, value):
             return False
         target["keymap"] = out
         return True
+    if key == "view_only":
+        norm = value.strip().lower()
+        if not norm or norm == "none":
+            target.pop("view_only", None)
+            return True
+        if norm == "on":
+            target["view_only"] = True
+            return True
+        if norm == "off":
+            if inherit_view_only:
+                target["view_only"] = False
+            else:
+                target.pop("view_only", None)
+            return True
+        return False
     return False
 
 
@@ -134,3 +149,12 @@ def effective_keyboard(host, d):
                     else:
                         keymap[src] = dst
     return kb, keymap
+
+
+def effective_view_only(host, d):
+    """Merged view_only boolean for a remote display from its host and own entry."""
+    view_only = False
+    for obj in (host, d):
+        if isinstance(obj.get("view_only"), bool):
+            view_only = obj["view_only"]
+    return view_only

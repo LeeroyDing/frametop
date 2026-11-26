@@ -143,6 +143,27 @@ class RemoteAppleTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.m.remote_command(["set", "studio-mac-virtual", "keymap=capslock:notakey"])
 
+        self.m.remote_command(["host", "Studio Mac", "view_only=on"])
+        self.assertIs(self.hosts()[0]["view_only"], True)
+        listed = io.StringIO()
+        with redirect_stdout(listed):
+            self.m.remote_command(["list"])
+        self.assertIn("view-only", listed.getvalue())
+
+        self.m.remote_command(["set", "studio-mac-virtual", "view_only=off"])
+        self.assertIs(self.hosts()[0]["displays"][0]["view_only"], False)
+        listed2 = io.StringIO()
+        with redirect_stdout(listed2):
+            self.m.remote_command(["list"])
+        self.assertNotIn("view-only", listed2.getvalue())
+
+        self.m.remote_command(["set", "studio-mac-virtual", "view_only=none"])
+        self.m.remote_command(["host", "Studio Mac", "view_only=off"])
+        self.assertNotIn("view_only", self.hosts()[0])
+        self.assertNotIn("view_only", self.hosts()[0]["displays"][0])
+        with self.assertRaises(RuntimeError):
+            self.m.remote_command(["set", "studio-mac-virtual", "view_only=maybe"])
+
 
     def test_pin_is_refused_for_a_mac(self):
         with self.assertRaisesRegex(RuntimeError, "--pin is for a Moonlight host"):

@@ -15,6 +15,7 @@
 // in ~/.config/frametop-layout.json or command-line arguments.
 #include "iris.h"
 #include "apple_hp.h"
+#include "route_settings.h"
 
 #include <dlfcn.h>
 #include <nlohmann/json.hpp>
@@ -92,69 +93,50 @@ nlohmann::json Layout() {
 }
 
 std::string Route(const std::string &host, int port) {
-    const nlohmann::json layout = Layout();
-    if (layout.is_null()) return host;
-    for (const auto &h : layout["hosts"]) {
-        if (!h.is_object() || h.value("address", "") != host) continue;
-        const std::string route = h.value("route", "auto");
-        if (route == "network") return host;
-        if (h.contains("direct") && h["direct"].is_array()) {
-            for (const auto &d : h["direct"]) {
-                if (d.is_string() && Answers(d.get<std::string>(), port, 1000)) return d.get<std::string>();
-            }
-        }
-        return route == "dongle" ? "" : host;
+    const HostRoute h = HostRouteOf(Layout(), host);
+    if (!h.known || h.mode == "network") return host;
+    for (const std::string &d : h.direct) {
+        if (Answers(d, port, 1000)) return d;
     }
-    return host;
+    return h.mode == "dongle" ? "" : host;
 }
 
-ft_apple_hp::KeyboardMappingConfig LoadKeyboardMapping(const std::string &host, const std::string &id) {
-    ft_apple_hp::KeyboardMappingConfig out;
-    const nlohmann::json layout = Layout();
-    if (layout.is_null()) return out;
+std::atomic<bool> g_rerouted{false};
 
-    const nlohmann::json *matched_host = nullptr;
-    const nlohmann::json *matched_disp = nullptr;
-    for (int pass = 0; pass < 2 && !matched_disp && !id.empty(); ++pass) {
-        for (const auto &h : layout["hosts"]) {
-            if (!h.is_object() || !h.contains("displays") || !h["displays"].is_array()) continue;
-            if (pass == 0 && h.value("address", "") != host) continue;
-            for (const auto &d : h["displays"]) {
-                if (d.is_object() && d.value("client", "") == id) {
-                    matched_host = &h;
-                    matched_disp = &d;
+void WatchDirect(std::string host, int port) {
+    RerouteWatch watch;
+    for (int64_t next = MonoNs() + kRerouteCheckSeconds * 1'000'000'000LL; !g_stop; usleep(100'000)) {
+        if (MonoNs() < next) continue;
+        next = MonoNs() + kRerouteCheckSeconds * 1'000'000'000LL;
+        const HostRoute h = HostRouteOf(Layout(), host);
+        std::string answered;
+        if (h.mode == "auto") {
+            for (const std::string &d : h.direct) {
+                if (Answers(d, port, 1000)) {
+                    answered = d;
                     break;
                 }
             }
-            if (matched_disp) break;
+        }
+        if (watch.Check(!answered.empty()) && !g_stop) {
+            std::printf("route: %s answers now, so the stream starts again through it\n", answered.c_str());
+            g_rerouted = true;
+            g_stop = 1;
+            return;
         }
     }
-    if (!matched_host) {
-        for (const auto &h : layout["hosts"]) {
-            if (h.is_object() && h.value("address", "") == host) {
-                matched_host = &h;
-                break;
-            }
-        }
-    }
+}
 
-    std::string kb_layout;
-    std::vector<std::pair<std::string, std::string>> keymap;
-    auto merge_from = [&](const nlohmann::json *obj) {
-        if (!obj || !obj->is_object()) return;
-        if (obj->contains("kb_layout") && (*obj)["kb_layout"].is_string()) {
-            const std::string v = (*obj)["kb_layout"].get<std::string>();
-            if (!v.empty()) kb_layout = v;
-        }
-        if (obj->contains("keymap") && (*obj)["keymap"].is_object()) {
-            for (auto it = (*obj)["keymap"].begin(); it != (*obj)["keymap"].end(); ++it) {
-                if (it.value().is_string()) keymap.emplace_back(it.key(), it.value().get<std::string>());
-            }
-        }
-    };
-    merge_from(matched_host);
-    merge_from(matched_disp);
-    ft_apple_hp::ApplyKeyboardSettings(kb_layout, keymap, &out);
+struct LoadedInputSettings {
+    ft_apple_hp::KeyboardMappingConfig kb;
+    bool view_only = false;
+};
+
+LoadedInputSettings LoadInputSettings(const std::string &host, const std::string &id, bool cli_view_only) {
+    LoadedInputSettings out;
+    const RawKeyboardSettings raw = KeyboardSettingsOf(Layout(), host, id);
+    ft_apple_hp::ApplyKeyboardSettings(raw.kb_layout, raw.keymap, &out.kb);
+    out.view_only = cli_view_only || raw.view_only;
     return out;
 }
 
@@ -391,7 +373,8 @@ private:
 };
 
 int RunStream(const std::string &host, const std::string &route, int port, const std::string &id,
-              const std::string &app, int viewer_fd, int width, int height, int fps, int bitrate) {
+              const std::string &app, int viewer_fd, int width, int height, int fps, int bitrate,
+              bool cli_view_only) {
     Viewer viewer{viewer_fd};
     sigset_t none;
     sigemptyset(&none);
@@ -405,11 +388,13 @@ int RunStream(const std::string &host, const std::string &route, int port, const
     struct stat layout_st{};
     bool has_layout_st = (stat(layout_path.c_str(), &layout_st) == 0);
 
+    const LoadedInputSettings initial_in = LoadInputSettings(host, id, cli_view_only);
+    bool view_only = initial_in.view_only;
     ft_apple_hp::SessionOptions opt;
     opt.host = route;
     opt.port = uint16_t(port ? port : kDefaultApplePort);
     opt.fps = fps;
-    opt.keyboard = LoadKeyboardMapping(host, id);
+    opt.keyboard = initial_in.kb;
     ft_apple_hp::ResolveAppleDisplayMode(app, width, height, &opt);
 
     const std::string creds_path = ft_apple_hp::AppleCredsPath(host);
@@ -458,7 +443,7 @@ int RunStream(const std::string &host, const std::string &route, int port, const
     }
     OPENSSL_cleanse(opt.password.data(), opt.password.size());
 
-    std::printf("apple-hp live: host=%s%s auth=%s app=%s server_init=%ux%u layout=%ux%u(backing %ux%u) canvas=%ux%u fps=%d bitrate=%d kb_layout=%s keymap=%zu\n",
+    std::printf("apple-hp live: host=%s%s auth=%s app=%s server_init=%ux%u layout=%ux%u(backing %ux%u) canvas=%ux%u fps=%d bitrate=%d kb_layout=%s keymap=%zu view_only=%s\n",
                 host.c_str(), route != host ? (" through " + route).c_str() : "",
                 client.auth_used().c_str(), app.c_str(),
                 client.server_init_w(), client.server_init_h(),
@@ -466,7 +451,8 @@ int RunStream(const std::string &host, const std::string &route, int port, const
                 client.layout().backing_w, client.layout().backing_h,
                 client.canvas().width, client.canvas().height, fps, bitrate,
                 ft_apple_hp::KeyboardLayoutName(client.keyboard_mapping().layout),
-                client.keyboard_mapping().keymap.size());
+                client.keyboard_mapping().keymap.size(),
+                view_only ? "on" : "off");
     std::fflush(stdout);
 
     bool owned[3] = {};
@@ -502,16 +488,16 @@ int RunStream(const std::string &host, const std::string &route, int port, const
             const uint32_t stream_w = conv.width ? conv.width : (client.canvas().width ? client.canvas().width : uint32_t(width));
             const uint32_t stream_h = conv.height ? conv.height : (client.canvas().height ? client.canvas().height : uint32_t(height));
             if (std::sscanf(msg.c_str(), "move %lf %lf", &x, &y) == 2) {
-                client.SendPointerMove(x, y, stream_w, stream_h);
+                if (!view_only) client.SendPointerMove(x, y, stream_w, stream_h);
             } else if (std::sscanf(msg.c_str(), "button %u %d", &c, &down) == 2) {
-                client.SendMouseButton(c, down != 0);
+                if (!view_only) client.SendMouseButton(c, down != 0);
             } else if (std::sscanf(msg.c_str(), "scroll %lf %lf", &x, &y) == 2) {
-                client.SendMouseScroll(x, y);
+                if (!view_only) client.SendMouseScroll(x, y);
             } else if (std::sscanf(msg.c_str(), "key %u %d", &c, &down) == 2 ||
                        std::sscanf(msg.c_str(), "peerkey %u %d", &c, &down) == 2) {
-                client.SendEvdevKey(c, down != 0);
+                if (!view_only) client.SendEvdevKey(c, down != 0);
             } else if (msg == "blur") {
-                client.SendInputBlur();
+                if (!view_only) client.SendInputBlur();
             } else if (msg.rfind("pad ", 0) == 0) {
                 // Apple Screen Sharing has no virtual Xbox controller channel; ignore cleanly.
             } else if (std::sscanf(msg.c_str(), "release %d", &idx) == 1) {
@@ -622,10 +608,15 @@ int RunStream(const std::string &host, const std::string &route, int port, const
                           cur_st.st_mtim.tv_nsec != layout_st.st_mtim.tv_nsec)) {
                 layout_st = cur_st;
                 has_layout_st = true;
-                const ft_apple_hp::KeyboardMappingConfig cur_kb = LoadKeyboardMapping(host, id);
-                if (client.SetKeyboardMapping(cur_kb)) {
-                    std::printf("apple-hp keyboard updated: kb_layout=%s keymap=%zu\n",
-                                ft_apple_hp::KeyboardLayoutName(cur_kb.layout), cur_kb.keymap.size());
+                const LoadedInputSettings cur_in = LoadInputSettings(host, id, cli_view_only);
+                if (!view_only && cur_in.view_only) client.SendInputBlur();
+                const bool vo_changed = (view_only != cur_in.view_only);
+                view_only = cur_in.view_only;
+                const bool kb_changed = client.SetKeyboardMapping(cur_in.kb);
+                if (kb_changed || vo_changed) {
+                    std::printf("apple-hp input updated: kb_layout=%s keymap=%zu view_only=%s\n",
+                                ft_apple_hp::KeyboardLayoutName(cur_in.kb.layout), cur_in.kb.keymap.size(),
+                                view_only ? "on" : "off");
                     std::fflush(stdout);
                 }
             }
@@ -652,10 +643,11 @@ int RunStream(const std::string &host, const std::string &route, int port, const
 
     g_stop = 1;
     alarm(kExitWatchdogS);
-    viewer.Send(ended_by_host ? ("state lost " + (end_reason.empty() ? std::string("the host ended the stream")
-                                                                     : end_reason.substr(0, 64)))
-                              : "state lost");
-    if (!ended_by_host) client.SendInputBlur();
+    viewer.Send(g_rerouted     ? "state lost moving to a direct address"
+                : ended_by_host ? ("state lost " + (end_reason.empty() ? std::string("the host ended the stream")
+                                                                       : end_reason.substr(0, 64)))
+                                : "state lost");
+    if (!ended_by_host && !view_only) client.SendInputBlur();
     audio.Stop();
     client.Close();
     dec.Close();
@@ -677,7 +669,7 @@ int main(int argc, char **argv) {
 
     std::string id, app = "apple:virtual", user, via_addr;
     int width = 3840, height = 2160, fps = 60, bitrate = 0, fd = -1;
-    bool pw_stdin = false, login = false, no_verify = false;
+    bool pw_stdin = false, login = false, no_verify = false, view_only = false;
     for (int i = 3; i < argc; ++i) {
         const std::string a = argv[i];
         const char *v = i + 1 < argc ? argv[i + 1] : "";
@@ -688,6 +680,7 @@ int main(int argc, char **argv) {
         else if (a == "--password-stdin") pw_stdin = true;
         else if (a == "--login") login = true;
         else if (a == "--no-verify") no_verify = true;
+        else if (a == "--view-only") view_only = true;
         else if (a == "--size") std::sscanf(v, "%dx%d", &width, &height), ++i;
         else if (a == "--fps") fps = std::atoi(v), ++i;
         else if (a == "--bitrate") bitrate = std::atoi(v), ++i;
@@ -782,7 +775,11 @@ int main(int argc, char **argv) {
             Viewer{fd}.Send("state lost the dongle link is down");
             return 1;
         }
-        return RunStream(host, route, port, id, app, fd, width, height, fps, bitrate);
+        const char *via = route != host ? "direct" : "network";
+        const bool routed = RouteSettings(Layout(), host, id, via, &fps, &bitrate);
+        if (routed) std::printf("stream: the %s route's settings, %d fps, %d kbit/s\n", via, fps, bitrate);
+        if (route == host) std::thread(WatchDirect, host, port).detach();
+        return RunStream(host, route, port, id, app, fd, width, height, fps, bitrate, view_only);
     }
     return std::fprintf(stderr, "unknown command %s\n", cmd.c_str()), 2;
 }
