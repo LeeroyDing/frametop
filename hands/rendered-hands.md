@@ -55,6 +55,18 @@ The hand recorder runs it before a session (DESIGN.md, "Camera check"). `hands/t
 
 It logs every decision to the journal. `ft-camwatch --once` prints the state and what it would do, and does nothing; `--dry-run` keeps watching without acting. `hands/frametop-camwatch.service` is the unit (a template, `@REPO@` as in the others; nothing installs or enables it yet). It isn't `PartOf=steamvr.service`, so it outlives the restart it asks for. `CAMWATCH_NOTIFY=0` turns the notification off. `hands/tests/test_camwatch.py` tests its decisions with made-up inputs.
 
+### The re-sync loop
+
+The watcher also looks for a second fault, which `camcheck.py` calls `ok` because all four cameras stay open. After some system suspends XRService logs `Set upper camera driver not in-sync` and then re-syncs the upper cameras without end: 200 to 700 `Sync done fully for cam` lines a minute, against 2 to 6 for a healthy wake. Each re-sync drops camera frames. ft-camd then gets 1 to 15 fps from cameras that give 30, and ft-hands runs at a few sets a second until SteamVR restarts (2026-10-23, 2026-10-28 and 2026-11-14 on one Frame; a standby wake alone didn't cause it).
+
+- The watcher counts those lines as it reads them, over the last 60 s, by its own clock. What a log already held when the watcher opened it doesn't count. The loop begins at `CAMWATCH_SYNC_PER_MIN` (100; 0 turns this off) and ends under a quarter of that.
+- When it begins, a notification goes to the Frametop desktop with a **Restart SteamVR** button. While the loop lasts and that notification has been closed, another follows after `CAMWATCH_RENOTIFY_MIN` (10). With no desktop running, or with Frametop paused (a VR game), it waits and tries again every 30 s.
+- Plasma puts its popup in a corner of the desktop's screen, which can be far off to one side of where you look: in the first headset test (2026-11-17) it sat about 120 degrees to the right, over a fullscreen video, and wasn't seen. So with each notification a notice also shows in front of your eyes for `CAMWATCH_BANNER_S` (8; 0: none) and says where the button is. It's `layout/countdown`'s helper (`ft-reset-timer --notice`): the countdown's panel, head-following, taking no input.
+- The button restarts SteamVR. The watcher then waits for a new XRService, vrserver and vrcompositor, 5 s more, and runs `desktops.sh start` in a unit of its own, so the desktop comes back; its windows don't. `CAMWATCH_RESTART_DESKTOP=0` leaves the desktop to you, and with `AUTOSTART=1` the autostart unit starts it instead. A notification left from an earlier SteamVR does nothing.
+- It never restarts SteamVR for this fault by itself, whatever `CAMWATCH_AUTO_RESTART` says: the loop only shows while the headset is worn.
+
+`ft-camwatch --notify-test` posts that notification and the notice, with a button that does nothing, to see how they show in the headset.
+
 ### What a SteamVR restart does to Frametop
 
 Read from the code on the experimental branch, not tried live:

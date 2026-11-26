@@ -1,5 +1,7 @@
 // Local Frametop reset countdown. CPU drawing; three uploads in a short-lived process.
 // --render-dir DIR is entirely offline and never initializes OpenVR.
+// --notice TITLE [--line TEXT]... [--seconds S] shows a notice the same way instead: the same
+// head-following panel, one upload, for S seconds (hands/ft-camwatch's alert uses it).
 #include <openvr.h>
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "stb_truetype.h"
@@ -25,6 +27,7 @@
 
 namespace {
 constexpr int kWidth = 640, kHeight = 360, kDurationMs = 3000;
+constexpr int kNoticeLines = 4, kNoticeSeconds = 8, kNoticeMaxSeconds = 60;
 using Clock = std::chrono::steady_clock;
 using Pixels = std::vector<unsigned char>;
 volatile std::sig_atomic_t stopped = 0;
@@ -61,19 +64,8 @@ class Renderer {
         font_.Draw(cps, height, x, centerY, [&](int px, int py, uint8_t cover) { Blend(p, px, py, rgb, cover / 255.f); });
     }
 
-public:
-    explicit Renderer(const std::string &path) {
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f || f.tellg() <= 0 || f.tellg() > 20 * 1024 * 1024) throw std::runtime_error("cannot read font: " + path);
-        std::vector<unsigned char> bytes(static_cast<size_t>(f.tellg()));
-        f.seekg(0);
-        if (!f.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size())) || !font_.Init(std::move(bytes)))
-            throw std::runtime_error("cannot initialize font: " + path);
-    }
-
-    Pixels Draw(int number) {
-        Pixels p(kWidth * kHeight * 4, 0);
-        // Rounded dark panel with a quiet rim and transparent outside corners.
+    // Rounded dark panel with a quiet rim and transparent outside corners.
+    void Panel(Pixels &p) {
         for (int y = 12; y < kHeight - 12; ++y) {
             for (int x = 12; x < kWidth - 12; ++x) {
                 const float qx = std::abs(x + .5f - kWidth / 2.f) - (kWidth / 2.f - 40);
@@ -84,6 +76,41 @@ public:
                 if (d > -2) Blend(p, x, y, {112, 133, 158}, .4f * cover);
             }
         }
+    }
+
+    // Text shrunk until it fits between the panel's sides.
+    void Fit(Pixels &p, const std::string &s, int height, int centerY, std::array<int, 3> rgb) {
+        const auto cps = glyphs::Codepoints(s);
+        while (height > 14 && font_.Width(cps, height) > kWidth - 96) --height;
+        Text(p, s.c_str(), height, centerY, rgb);
+    }
+
+public:
+    explicit Renderer(const std::string &path) {
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f || f.tellg() <= 0 || f.tellg() > 20 * 1024 * 1024) throw std::runtime_error("cannot read font: " + path);
+        std::vector<unsigned char> bytes(static_cast<size_t>(f.tellg()));
+        f.seekg(0);
+        if (!f.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size())) || !font_.Init(std::move(bytes)))
+            throw std::runtime_error("cannot initialize font: " + path);
+    }
+
+    // A title and its lines, centred as a block on the panel.
+    Pixels DrawNotice(const std::string &title, const std::vector<std::string> &lines) {
+        Pixels p(kWidth * kHeight * 4, 0);
+        Panel(p);
+        constexpr int titleH = 40, lineH = 30, gap = 30, step = 44;
+        const int n = int(lines.size());
+        int y = (kHeight - (titleH + (n ? gap + lineH + (n - 1) * step : 0))) / 2;
+        Fit(p, title, titleH, y + titleH / 2, {250, 208, 122});
+        y += titleH + gap;
+        for (int i = 0; i < n; ++i) Fit(p, lines[i], lineH, y + lineH / 2 + i * step, {231, 238, 246});
+        return p;
+    }
+
+    Pixels Draw(int number) {
+        Pixels p(kWidth * kHeight * 4, 0);
+        Panel(p);
         Text(p, "Recentering", 30, 54, {180, 195, 213});
         const char digit[] = {char('0' + number), 0};
         Text(p, digit, 166, 157, {246, 249, 253});
@@ -117,7 +144,7 @@ public:
         if (initialized_) vr::VR_Shutdown();
     }
 
-    bool Open(double deadline) {
+    bool Open(double deadline, const char *what = "reset-countdown", const char *name = "Frametop reset countdown") {
         if (Expired(deadline)) return false;
         vr::EVRInitError error = vr::VRInitError_None;
         vr::VR_Init(&error, vr::VRApplication_Background);
@@ -126,8 +153,8 @@ public:
         if (Expired(deadline)) return false;
         if (!vr::VROverlay()) throw std::runtime_error("OpenVR overlay interface unavailable");
         // Existing Frametop pointer code excludes frametop.guide* from collision rays.
-        const std::string key = "frametop.guide.reset-countdown." + std::to_string(getpid());
-        Check(vr::VROverlay()->CreateOverlay(key.c_str(), "Frametop reset countdown", &handle_), "create");
+        const std::string key = std::string("frametop.guide.") + what + "." + std::to_string(getpid());
+        Check(vr::VROverlay()->CreateOverlay(key.c_str(), name, &handle_), "create");
         if (Expired(deadline)) return false;
         Check(vr::VROverlay()->SetOverlayInputMethod(handle_, vr::VROverlayInputMethod_None), "input disabled");
         Check(vr::VROverlay()->SetOverlayFlag(handle_, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, false), "interaction disabled");
@@ -172,7 +199,10 @@ void CheckOffline(const std::array<Pixels, 3> &frames) {
 int main(int argc, char **argv) {
     try {
         std::string renderDir, font;
-        bool checkOnly = false;
+        bool checkOnly = false, notice = false;
+        std::string title;
+        std::vector<std::string> lines;
+        int seconds = kNoticeSeconds;
         double deadline = 0;
         for (int i = 1; i < argc; ++i) {
             const std::string arg = argv[i];
@@ -184,15 +214,31 @@ int main(int argc, char **argv) {
                 deadline = std::strtod(value, &end);
                 if (end == value || *end || !std::isfinite(deadline) || deadline <= 0)
                     throw std::runtime_error("--deadline needs positive finite CLOCK_MONOTONIC seconds");
+            } else if (arg == "--notice" && i + 1 < argc) {
+                notice = true;
+                title = argv[++i];
+            } else if (arg == "--line" && i + 1 < argc) {
+                if (int(lines.size()) == kNoticeLines) throw std::runtime_error("a notice has at most 4 lines");
+                lines.push_back(argv[++i]);
+            } else if (arg == "--seconds" && i + 1 < argc) {
+                const char *value = argv[++i];
+                char *end = nullptr;
+                const long s = std::strtol(value, &end, 10);
+                if (end == value || *end || s < 1 || s > kNoticeMaxSeconds)
+                    throw std::runtime_error("--seconds needs 1 to 60");
+                seconds = int(s);
             } else if (arg == "--check") {
                 checkOnly = true;
             } else if (arg == "--help") {
-                std::puts("ft-reset-timer [--font FILE] [--deadline SECONDS] [--render-dir DIR | --check]\nShows a non-interactive, head-following 3-2-1 for three seconds.\n--deadline is an absolute CLOCK_MONOTONIC expiry, used by ft-layout.\n--render-dir and --check are offline; they never initialize OpenVR.");
+                std::puts("ft-reset-timer [--font FILE] [--deadline SECONDS] [--render-dir DIR | --check]\nShows a non-interactive, head-following 3-2-1 for three seconds.\n--deadline is an absolute CLOCK_MONOTONIC expiry, used by ft-layout.\n--render-dir and --check are offline; they never initialize OpenVR.\nft-reset-timer --notice TITLE [--line TEXT]... [--seconds S] [--font FILE] [--deadline SECONDS] [--render-dir DIR]\nShows a notice the same way instead: a title and up to 4 lines, for S seconds (8; 1 to 60).");
                 return 0;
             } else {
                 throw std::runtime_error("unknown or incomplete option: " + arg);
             }
         }
+        if (!notice && (!lines.empty() || seconds != kNoticeSeconds))
+            throw std::runtime_error("--line and --seconds go with --notice TITLE");
+        if (notice && checkOnly) throw std::runtime_error("--check is the countdown's");
         if (Expired(deadline)) return 3;
         if (font.empty()) {
             for (const char *path : {"/usr/share/fonts/noto/NotoSans-Regular.ttf",
@@ -202,6 +248,30 @@ int main(int argc, char **argv) {
             if (font.empty()) throw std::runtime_error("Noto Sans font unavailable; pass --font FILE");
         }
         Renderer renderer(font);
+        if (notice) {
+            Pixels frame = renderer.DrawNotice(title, lines);
+            if (!renderDir.empty()) {
+                std::filesystem::create_directories(renderDir);
+                const auto path = std::filesystem::path(renderDir) / "notice.png";
+                if (!stbi_write_png(path.c_str(), kWidth, kHeight, 4, frame.data(), kWidth * 4))
+                    throw std::runtime_error("cannot write " + path.string());
+                return 0;
+            }
+            std::signal(SIGINT, Stop);
+            std::signal(SIGTERM, Stop);
+            std::signal(SIGHUP, Stop);
+            Overlay overlay;
+            if (!overlay.Open(deadline, "notice", "Frametop notice")) return 3;
+            overlay.Picture(frame);
+            if (Expired(deadline)) return 3;
+            overlay.Show();
+            const auto start = Clock::now();
+            while (!stopped && Clock::now() - start < std::chrono::seconds(seconds)) {
+                if (Expired(deadline) || overlay.QuitRequested()) return 3;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return stopped ? 3 : 0;
+        }
         std::array<Pixels, 3> frames{renderer.Draw(3), renderer.Draw(2), renderer.Draw(1)};
         CheckOffline(frames);
         if (!renderDir.empty()) {
