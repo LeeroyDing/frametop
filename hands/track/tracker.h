@@ -171,11 +171,13 @@ public:
     skel::Skeleton &skeleton() { return skel_; }
     // The wearer's hand size (track/profile.h), per side (0 left, 1 right): learned from every clean
     // stereo frame, like Hand::scale, but kept past the hand, and by a profile past the run. When on,
-    // a new hand starts at it instead of at the model's average hand (1.0), so the first one-view
-    // frames of a hand this wearer's size aren't placed nearer or further than it is. Off by default,
-    // so old replays repeat; ft-hands turns it on with the profile.
+    // a new hand starts at this run's settled scale (falling back to the saved prior before this run
+    // settles) instead of at the model's average hand (1.0), so the first one-view frames of a hand
+    // this wearer's size aren't placed nearer or further than it is. Off by default, so old replays
+    // repeat; ft-hands turns it on with the profile.
     void set_user_scale(bool on) { user_scale_on_ = on; }
-    void seed_user_scale(int side, const profile::Running &r) { user_scale_[side > 0] = r; }
+    void set_scale_prior(int side, const profile::Running &r) { prior_scale_[side > 0] = r; }
+    void clear_scale_prior() { prior_scale_[0] = prior_scale_[1] = {}; }
     const profile::Running &user_scale(int side) const { return user_scale_[side > 0]; }
     double start_scale() const;   // a new hand's: the settled sides' mean (its side isn't known yet), else 1
     // Where the palm search finds this wearer's hands (profile::TileStat). When on, the rotation
@@ -250,7 +252,8 @@ private:
     bool skeleton_on_ = true;
     skel::Skeleton skel_;
     bool user_scale_on_ = false;
-    profile::Running user_scale_[2];   // left, right
+    profile::Running prior_scale_[2];  // left, right (loaded prior; read-only during a run)
+    profile::Running user_scale_[2];   // left, right (this run's fresh samples)
     bool tile_learning_ = false;
     std::vector<profile::TileStat> tile_stats_;   // one per tile, as tiles_
     std::vector<View> views_;

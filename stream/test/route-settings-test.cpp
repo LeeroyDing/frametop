@@ -122,31 +122,31 @@ int main() {
     // Host + display keyboard layout, keymap, and view_only merging (including duplicate host addresses).
     const nlohmann::json kb_layout = nlohmann::json::parse(R"({
       "hosts": [
-        {"name": "Workstation", "address": "Magma-Llama.local", "kb_layout": "colemak",
+        {"name": "Workstation", "address": "studio-mac.local", "kb_layout": "colemak",
          "view_only": true, "keymap": {"capslock": "esc"}, "displays": [
            {"id": "workstation-virtual", "client": "frametop-workstation-virtual"},
            {"id": "workstation-interactive", "client": "frametop-workstation-interactive", "view_only": false}
          ]},
-        {"name": "Magma Llama", "address": "Magma-Llama.local", "kb_layout": "qwerty",
+        {"name": "Studio Mac", "address": "studio-mac.local", "kb_layout": "qwerty",
          "keymap": {"leftalt": "leftmeta"}, "displays": [
-           {"id": "magma-llama-virtual", "client": "frametop-magma-llama-virtual",
+           {"id": "studio-mac-virtual", "client": "frametop-studio-mac-virtual",
             "kb_layout": "dvorak", "keymap": {"capslock": "leftctrl"}, "view_only": true}
          ]}
       ]
     })");
-    const RawKeyboardSettings kb = KeyboardSettingsOf(kb_layout, "Magma-Llama.local", "frametop-magma-llama-virtual");
+    const RawKeyboardSettings kb = KeyboardSettingsOf(kb_layout, "studio-mac.local", "frametop-studio-mac-virtual");
     CHECK(kb.kb_layout == "dvorak");
     CHECK(kb.keymap.size() == 2);
     CHECK(kb.keymap[0] == std::make_pair(std::string("leftalt"), std::string("leftmeta")));
     CHECK(kb.keymap[1] == std::make_pair(std::string("capslock"), std::string("leftctrl")));
     CHECK(kb.view_only);
     // Also resolves by unique client ID when connected via a direct IP address.
-    const RawKeyboardSettings kb_direct = KeyboardSettingsOf(kb_layout, "192.168.1.102", "frametop-magma-llama-virtual");
+    const RawKeyboardSettings kb_direct = KeyboardSettingsOf(kb_layout, "192.0.2.10", "frametop-studio-mac-virtual");
     CHECK(kb_direct.kb_layout == "dvorak" && kb_direct.keymap.size() == 2 && kb_direct.view_only);
     // Host-level view_only=true is inherited unless the display explicitly overrides view_only=false.
-    const RawKeyboardSettings ws_vo = KeyboardSettingsOf(kb_layout, "Magma-Llama.local", "frametop-workstation-virtual");
+    const RawKeyboardSettings ws_vo = KeyboardSettingsOf(kb_layout, "studio-mac.local", "frametop-workstation-virtual");
     CHECK(ws_vo.view_only);
-    const RawKeyboardSettings ws_in = KeyboardSettingsOf(kb_layout, "Magma-Llama.local", "frametop-workstation-interactive");
+    const RawKeyboardSettings ws_in = KeyboardSettingsOf(kb_layout, "studio-mac.local", "frametop-workstation-interactive");
     CHECK(!ws_in.view_only);
 
     std::printf("route_settings_test: %d checks, %d failed\n", g_checks, g_fail);

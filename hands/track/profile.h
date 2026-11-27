@@ -56,6 +56,17 @@ bool prior_shape(const Side &s, skel::Shape &out);
 // fitted a recording worse (90th percentile 25.0 mm against 19.7 learned afresh).
 void merge(const Side &before, const Side &run, Side &out);
 
+// Second-wearer guard: compares a session's fresh measurements against the saved profile so
+// lending the headset to someone with different-sized hands doesn't blend theirs into the saved
+// profile. Finger bone lengths (quantities 15..29, triangulated metres) are checked once at least
+// one side has settled all 30 quantities in both saved and run; both-sides mean scale is a backup
+// once both sides have settled scale in saved and kGuestScaleMinSamples clean stereo frames in run.
+// Returns true on mismatch, writing the measured ratio (run / saved) to *ratio_out if non-null.
+constexpr double kGuestBoneDiff = 0.10, kGuestScaleDiff = 0.14;
+constexpr long kGuestScaleMinSamples = 150;
+struct Profile;
+bool wearer_mismatch(const Profile &saved, const Side run[2], double *ratio_out = nullptr);
+
 // One of the palm search's tiles (Tracker::Tile): how often the search's rotation tried it while no
 // tracked hand was in it, and how often that found a hand. Where this wearer's hands come into
 // view and rest shows up as tiles that find more than the others.

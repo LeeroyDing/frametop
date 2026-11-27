@@ -140,6 +140,62 @@ int main() {
         wild.q[20] = 0.5;
         profile::merge(back.side[1], wild, merged);
         CHECK(merged.q[20] == back.side[1].q[20] && merged.q[21] != back.side[1].q[21]);
+        // repeated sessions with fresh per-run sample counts accumulate linearly, not exponentially
+        profile::Side acc = back.side[1];
+        for (int i = 0; i < 4; ++i) {
+            profile::Side next;
+            profile::merge(acc, run, next);
+            acc = next;
+        }
+        CHECK(acc.scale.n == back.side[1].scale.n + 4 * run.scale.n);
+        // clear_prior drops the loaded shape immediately
+        Skeleton sk_clear;
+        skel::Shape pr;
+        CHECK(profile::prior_shape(back.side[1], pr));
+        sk_clear.set_prior(1, pr);
+        CHECK(biggest_difference(sk_clear.shape(1, 1.0), truth_r) < 1e-5);
+        sk_clear.clear_prior();
+        CHECK(biggest_difference(sk_clear.shape(1, 1.0), Skeleton::canonical(1.0)) < 1e-12);
+    }
+
+    // --- second-wearer guard: protects the saved profile when someone else wears the headset
+    {
+        profile::Side run[2];
+        double ratio = 0;
+        // empty saved profile never flags a mismatch
+        CHECK(!profile::wearer_mismatch(profile::Profile{}, run, &ratio));
+        // same wearer (within ±5% bone length): matches
+        Calibration same_l, same_r;
+        feed(same_l, 1.20, 60);
+        feed(same_r, 1.24, 60);
+        run[0] = side_of(same_l, 1.20, 200);
+        run[1] = side_of(same_r, 1.24, 200);
+        CHECK(!profile::wearer_mismatch(back, run, &ratio) && std::fabs(ratio - 1.017) < 0.02);
+        // smaller-handed guest (~18% shorter finger bones): triggers on one settled side
+        Calibration guest_small;
+        feed(guest_small, 0.97, 60);
+        profile::Side small_run[2];
+        small_run[0] = side_of(guest_small, 0.97, 80);
+        CHECK(profile::wearer_mismatch(back, small_run, &ratio) && ratio < 0.85);
+        // larger-handed guest (~16% longer finger bones): triggers
+        Calibration guest_big;
+        feed(guest_big, 1.40, 60);
+        profile::Side big_run[2];
+        big_run[1] = side_of(guest_big, 1.40, 80);
+        CHECK(profile::wearer_mismatch(back, big_run, &ratio) && ratio > 1.12);
+        // scale-only fallback (no settled shapes): requires both sides >= kGuestScaleMinSamples and >14% diff
+        profile::Side scale_only[2];
+        scale_only[0].scale = {0.95, 100};
+        scale_only[1].scale = {0.95, 100};
+        CHECK(!profile::wearer_mismatch(back, scale_only, &ratio));   // under 150 frames: wait
+        scale_only[0].scale.n = 160;
+        CHECK(!profile::wearer_mismatch(back, scale_only, &ratio));   // only one side past 150: wait
+        scale_only[1].scale.n = 160;
+        CHECK(profile::wearer_mismatch(back, scale_only, &ratio) && ratio < 0.82);   // both past 150 & >14% off
+        // single-side lighting bias with matching mean does not trigger scale-only mismatch
+        scale_only[0].scale = {1.38, 200};
+        scale_only[1].scale = {1.06, 200};
+        CHECK(!profile::wearer_mismatch(back, scale_only, &ratio));
     }
 
     // --- the search's tiles: more where hands turn up, never none

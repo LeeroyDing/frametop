@@ -25,7 +25,8 @@ layout/ft-layout remote list
 - `stream/route_settings.h`: parses per-route `fps` (1–240) and `bitrate` (0–500000 kbit/s), `HostRouteOf`, `RerouteWatch` (two consecutive probes 10 s apart), and `view_only` merged from host and display entries.
 - `stream/ft-stream.cpp` and `stream/ft-appless.cpp`: apply route settings once the route is chosen and run `WatchDirect` while on the host's own address with `route=auto`, restarting cleanly onto a direct address when it comes up. `ft-appless` also supports hot-reloaded `view_only=on|off` (releasing held keys/buttons when toggled on) and `--view-only`.
 - `layout/ft_layout.py` and `layout/ft_remotekeys.py`: manage `direct.*`, `network.*`, and `view_only=on|off|none`, restarting a running stream when route settings change.
-- Offline tests: `stream/test/route-settings-test.cpp` (`scripts/test-route-settings.sh`), `layout/tests/test_remote_routes.py`, and `layout/tests/test_remote_apple.py`.
+- `remote-displays/ft_remote_displays.py` and `remote-displays/RemoteDisplayPages.qml`: **Dongle / direct** and **Network** fps/bitrate override rows in each display's expanded settings when the host has a direct address (upstream [PR #112](https://github.com/Frametop/frametop/pull/112)).
+- Offline tests: `stream/test/route-settings-test.cpp` (`scripts/test-route-settings.sh`), `layout/tests/test_remote_routes.py`, `layout/tests/test_remote_apple.py`, and `remote-displays/test/test_route_settings.py`.
 
 ### Slow-hands alert and head-following notice
 
@@ -42,7 +43,7 @@ $R/hands/ft-camwatch --notify-test
 
 ### Local hand profile with confirmed-click pinch learning
 
-`ft-hands` keeps what it learns about the wearer's hands in `~/.local/state/frametop/hands/profile` (numbers only, mode 0600, saved every 5 minutes and on exit): hand size (`user_scale`, moving slowly after settling), bone lengths (used as the fit's starting guess and merged halfway on save), CPU search tile weights (outside cameras handled by `ft-npud`'s palm detector), and pinch thresholds trained only from pinches the pointer helper turned into clicks, presses, drags, or scrolls (`hands/include/fh_verdicts.h`). Works alongside both `ft-npud` NPU hand tracking and CPU fallback. See [tracking.md](../hands/tracking.md#hand-profile); `HANDS_PROFILE=0` disables it and `ft-handsctl profile [forget]` inspects or clears it.
+`ft-hands` keeps what it learns about the wearer's hands in `~/.local/state/frametop/hands/profile` (numbers only, mode 0600, saved every 5 minutes and on exit; upstream [PR #113](https://github.com/Frametop/frametop/pull/113)): hand size (`user_scale`, accumulated fresh per run against the loaded `prior_scale_`), bone lengths (used as the fit's starting guess and merged halfway on save), CPU search tile weights (outside cameras handled by `ft-npud`'s palm detector), pinch thresholds trained only from pinches the pointer helper turned into clicks, presses, drags, or scrolls (`hands/include/fh_verdicts.h`), and an automatic second-wearer guard (`profile::wearer_mismatch`) that drops priors and skips saving if another wearer's settled hands diverge. Works alongside both `ft-npud` NPU hand tracking and CPU fallback. See [tracking.md](../hands/tracking.md#hand-profile); `HANDS_PROFILE=0` disables it and `ft-handsctl profile [forget]` inspects or clears it.
 
 ### Small reliability fixes
 

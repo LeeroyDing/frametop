@@ -115,6 +115,7 @@ namespace {
 
 volatile std::sig_atomic_t g_stop = 0, g_record = 0;
 constexpr double kProfileSaveS = 300;   // the hand profile is written this often while it changes
+constexpr double kGuestCheckS = 10;     // how often a session checks whether its hands match the saved profile
 
 // Which calibrated camera each video device carries. XRService names each tracking camera's
 // sensor subdev once per instance ("Found camera 'slam_left': interface=msm_csiphy0
@@ -710,7 +711,8 @@ int main(int argc, char **argv) {
     };
     // The pinch detector's distances moved to the wearer's pinches (profile::learned_pinch): at the
     // start, and each time the profile is saved. The ones it was started with are where it moves from.
-    auto learn_pinch = [&, begin0 = pinch_params.begin_m, dip0 = pinch_params.dip_max_m] {
+    const double begin0 = pinch_params.begin_m, dip0 = pinch_params.dip_max_m;
+    auto learn_pinch = [&] {
         if (!profile_pinch) return;
         profile::PinchStat both = pinch_seen.stat[0];
         both.add(pinch_seen.stat[1]);
@@ -728,6 +730,7 @@ int main(int argc, char **argv) {
     profile::Profile prof, loaded;   // loaded: as the file was at the start (what a save merges this run into)
     std::string prof_text;   // what the file holds
     int prof_saves = 0;
+    bool guest_wearer = false;   // true once this run's hands diverge from the saved profile: stop saving
     if (profiling) {
         if (profile_path.empty()) profile_path = profile::default_path();
         std::string perr;
@@ -737,7 +740,7 @@ int main(int argc, char **argv) {
         for (int s = 0; s < 2; ++s) {
             skel::Shape sh;
             if (profile::prior_shape(prof.side[s], sh)) tracker.skeleton().set_prior(s, sh);
-            tracker.seed_user_scale(s, prof.side[s].scale);
+            tracker.set_scale_prior(s, prof.side[s].scale);
         }
         if (profile_search) {
             tracker.set_tile_learning(true);
@@ -762,9 +765,31 @@ int main(int argc, char **argv) {
         }
         learn_pinch();
     }
+    // Second-wearer check: if this run's settled hand shape or size diverges from the loaded profile,
+    // revert to this session's own measurements and leave the saved file untouched.
+    auto check_wearer = [&] {
+        if (!profiling || guest_wearer || loaded.empty()) return;
+        profile::Side run[2];
+        for (int s = 0; s < 2; ++s) {
+            tracker.skeleton().calibration(s).quantities(run[s].q, run[s].n);
+            run[s].scale = tracker.user_scale(s);
+        }
+        double ratio = 1.0;
+        if (!profile::wearer_mismatch(loaded, run, &ratio)) return;
+        guest_wearer = true;
+        tracker.clear_scale_prior();
+        tracker.skeleton().clear_prior();
+        tracker.set_tile_learning(false);
+        if (profile_pinch) pinch.set_learned(begin0, dip0);
+        std::printf("hand profile: these hands differ from the saved profile (ratio %.2f): using this session's measurements only and leaving %s untouched\n",
+                    ratio, profile_path.c_str());
+        std::fflush(stdout);
+    };
     // Writes the profile when what the tracker knows has changed: every few minutes, and as it stops.
     auto save_profile = [&] {
         if (!profiling) return;
+        check_wearer();
+        if (guest_wearer) return;
         for (int s = 0; s < 2; ++s) {
             profile::Side run;
             tracker.skeleton().calibration(s).quantities(run.q, run.n);
@@ -787,7 +812,7 @@ int main(int argc, char **argv) {
         if (profile::save(profile_path, prof, perr)) prof_text = now_text, ++prof_saves;
         else std::printf("hand profile: not saved: %s\n", perr.c_str());
     };
-    uint64_t t_profile = mono_ns();
+    uint64_t t_profile = mono_ns(), t_guest = t_profile;
     std::map<std::string, std::vector<uint8_t>> pixels;
     // A mono set is the side pair's newer frames (all the mono cameras' without both sides) with
     // the upper pair's from the same moment. XRService keeps the uppers in step with the sides,
@@ -1312,8 +1337,8 @@ int main(int argc, char **argv) {
             holding.insert(holding.end(), held2.begin(), held2.end());
             grip.update(hands, views, int64_t(capture), holding);
             pinch.update(hands, views, int64_t(capture), grip.gripping(), middle.down());
-            if (profile_pinch) read_verdicts(int64_t(capture));
-            if (profile_pinch)
+            if (profile_pinch && !guest_wearer) read_verdicts(int64_t(capture));
+            if (profile_pinch && !guest_wearer)
                 for (int s = 0; s < 2; ++s) {
                     bool began = false, ended = false, lost = false;
                     for (const Pinch::Event &e : pinch.events)
@@ -1365,6 +1390,7 @@ int main(int argc, char **argv) {
         left_sets += on_left, right_sets += on_right, both_sets += on_left && on_right;
 
         const uint64_t now = mono_ns();
+        if ((now - t_guest) / 1e9 >= kGuestCheckS) check_wearer(), t_guest = now;
         if ((now - t_profile) / 1e9 >= kProfileSaveS) save_profile(), t_profile = now;
         if (status > 0 && (now - t_status) / 1e9 >= status) {
             const double dt = (now - t_status) / 1e9, cpu1 = cpu_seconds();
@@ -1422,12 +1448,12 @@ int main(int argc, char **argv) {
                     for (const profile::TileStat &t : stats) tries += t.tries, finds += t.finds;
                 std::printf("        hand profile: size left %.2f right %.2f (new hands start at %.2f)  shape settled left %.0f%% "
                             "right %.0f%%  search %.0f finds in %.0f tries  pinches %.0f (this run: %d clicked, %d held back, %d unanswered; "
-                            "begin under %.0f mm, dips under %.0f mm)  saved %d time(s)\n",
+                            "begin under %.0f mm, dips under %.0f mm)  saved %d time(s)%s\n",
                             tracker.user_scale(0).value, tracker.user_scale(1).value, tracker.start_scale(),
                             100 * tracker.skeleton().calibration(0).settled(), 100 * tracker.skeleton().calibration(1).settled(),
                             finds, tries, pinch_seen.stat[0].tap_n() + pinch_seen.stat[1].tap_n(), pinch_seen.confirmed,
                             pinch_seen.refused, pinch_seen.unanswered, 1000 * pinch.params().begin_m,
-                            1000 * pinch.params().dip_max_m, prof_saves);
+                            1000 * pinch.params().dip_max_m, prof_saves, guest_wearer ? "  [different wearer: not saving]" : "");
             }
             if (gestures_on) {
                 std::printf("        pinches: left %u right %u (held back, palm down: %d %d)  middle pinches: left %u right %u  "

@@ -121,6 +121,7 @@ public:
     // calibration has settled, in place of the model's average hand (or the other side's). Once a
     // quantity has its kSettle samples this run, this run's estimate takes over, as without one.
     void set_prior(int side, const Shape &s) { prior_[side > 0] = s, has_prior_[side > 0] = true; }
+    void clear_prior() { has_prior_[0] = has_prior_[1] = false; }
     Shape shape(int side, double scale) const;   // the side's current estimate
     static Shape canonical(double scale);        // the model's average hand, times scale
     const Params &params() const { return p_; }

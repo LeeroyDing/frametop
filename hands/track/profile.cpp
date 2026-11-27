@@ -56,6 +56,35 @@ void merge(const Side &before, const Side &run, Side &out) {
     out = m;
 }
 
+bool wearer_mismatch(const Profile &saved, const Side run[2], double *ratio_out) {
+    std::vector<double> bone_ratios;
+    for (int s = 0; s < 2; ++s) {
+        if (saved.side[s].settled() < skel::kQuantities || run[s].settled() < skel::kQuantities) continue;
+        for (int k = 15; k < skel::kQuantities; ++k) {
+            if (saved.side[s].q[k] > 0.005 && run[s].q[k] > 0.005)
+                bone_ratios.push_back(run[s].q[k] / saved.side[s].q[k]);
+        }
+    }
+    if (!bone_ratios.empty()) {
+        std::sort(bone_ratios.begin(), bone_ratios.end());
+        const size_t mid = bone_ratios.size() / 2;
+        const double med = bone_ratios.size() % 2 ? bone_ratios[mid] : 0.5 * (bone_ratios[mid - 1] + bone_ratios[mid]);
+        if (ratio_out) *ratio_out = med;
+        return std::fabs(med - 1.0) > kGuestBoneDiff;
+    }
+    if (saved.side[0].scale.settled() && saved.side[1].scale.settled() &&
+        run[0].scale.n >= kGuestScaleMinSamples && run[1].scale.n >= kGuestScaleMinSamples) {
+        const double saved_mean = 0.5 * (saved.side[0].scale.value + saved.side[1].scale.value);
+        const double run_mean = 0.5 * (run[0].scale.value + run[1].scale.value);
+        if (saved_mean > 0) {
+            const double ratio = run_mean / saved_mean;
+            if (ratio_out) *ratio_out = ratio;
+            return std::fabs(ratio - 1.0) > kGuestScaleDiff;
+        }
+    }
+    return false;
+}
+
 bool Profile::empty() const {
     for (const Side &s : side)
         if (s.scale.n > 0 || s.settled() > 0) return false;

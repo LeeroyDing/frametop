@@ -404,7 +404,7 @@ int main(int argc, char **argv) {
             for (int s = 0; s < 2; ++s) {
                 skel::Shape sh;
                 if (profile::prior_shape(prof.side[s], sh)) tracker.skeleton().set_prior(s, sh);
-                tracker.seed_user_scale(s, prof.side[s].scale);
+                tracker.set_scale_prior(s, prof.side[s].scale);
                 std::printf("hand profile: %s size %.2f (%ld frames), shape %d/%d settled\n", s ? "right" : "left ",
                             prof.side[s].scale.value, prof.side[s].scale.n, prof.side[s].settled(), skel::kQuantities);
             }

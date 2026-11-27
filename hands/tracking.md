@@ -45,6 +45,8 @@ ft-hands learns the size and shape of the wearer's hands as it tracks, and used 
 - **Where the search finds hands** (`profile::TileStat`, `HANDS_PROFILE_SEARCH=0` turns it off). When the CPU tile rotation runs (outside cameras handled by `ft-npud`'s palm detector), it counts tries without a tracked hand and finds per tile, boosting weights up to 4x (floor 0.5x) after ~50 tries and halving past 20,000 tries.
 - **The pinch** (`profile::PinchStat`, `HANDS_PROFILE_PINCH=0` turns it off). Counts the lowest thumb-index distance for pinches the pointer helper turned into a click, press, drag, or scroll (`include/fh_verdicts.h`) plus idle-hand distances. After 100 confirmed pinches, `dip_max_m` tightens (floor 24 mm) and `begin_m` rises (by up to 6 mm, staying 3 mm under idle fingers' 1st percentile).
 
+- **Second wearer.** Once a session settles its own stereo measurements (finger bone lengths on either side, or both sides' hand scale past 150 stereo frames), ft-hands compares them against the saved profile (`profile::wearer_mismatch`). If finger bone lengths differ by more than 10% (or both-sides mean scale by more than 14%), it drops the saved priors, resets pinch thresholds to their defaults, stops saving for the rest of that run, and logs a note so another wearer never overwrites the saved profile.
+
 It's written when it has changed, every 5 minutes while ft-hands tracks and as it stops. `HANDS_PROFILE=0` turns it all off. `ft-handsctl profile` shows the file and `ft-handsctl profile forget` deletes it.
 
 ## Pinch

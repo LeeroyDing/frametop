@@ -198,8 +198,10 @@ double Tracker::start_scale() const {
     if (!user_scale_on_) return 1.0;
     double sum = 0;
     int n = 0;
-    for (const profile::Running &r : user_scale_)
+    for (int s = 0; s < 2; ++s) {
+        const profile::Running &r = user_scale_[s].settled() ? user_scale_[s] : prior_scale_[s];
         if (r.settled()) sum += r.value, ++n;
+    }
     return n ? sum / n : 1.0;
 }
 
